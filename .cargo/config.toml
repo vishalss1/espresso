@@ -1,0 +1,8 @@
+[cargo]
+target = "xtensa-esp32-none-elf"
+
+[build]
+runner = "espflash"
+
+[build.env]
+RUSTFLAGS = "-C link-arg=-T../../kernel/linker.ld"

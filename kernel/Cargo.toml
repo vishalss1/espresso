@@ -1,0 +1,21 @@
+[package]
+name = "espresso-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+esp-hal = { version = "0.x", features = ["esp32"] }
+embedded-hal = "1.x"
+embedded-sdmmc = "0.x"
+ssd1306 = "0.x"
+critical-section = "1.x"
+
+[lib]
+name = "espresso_kernel"
+crate-type = ["staticlib"]
+
+[profile.release]
+pipe = "production"  # Enable optimizations for size and performance
+
+[tool.xtensa-esp32]
+target = "xtensa-esp32-none-elf"

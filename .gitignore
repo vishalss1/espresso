@@ -1,0 +1,36 @@
+CLAUDE.md
+
+# Rust build output
+target/
+
+# espflash build artifacts
+*.bin
+*.elf
+*.map
+
+# Python bytecode (sdk/emit_espr.py)
+__pycache__/
+*.pyc
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# espflash port config (machine-specific)
+espflash.toml
+
+# Compiled .espr user programs (build artifacts)
+*.espr
+
+# SD card image if ever generated locally
+*.img
+
+# Linker intermediate objects
+*.o
+*.a

@@ -1,0 +1,3 @@
+[toolchain]
+channel = "nightly"
+target = "xtensa-esp32-none-elf"
