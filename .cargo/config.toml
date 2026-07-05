@@ -1,8 +1,9 @@
-[cargo]
-target = "xtensa-esp32-none-elf"
-
 [build]
-runner = "espflash"
+target = "xtensa-esp32-none-elf"
+rustflags = [
+    "-C", "target-feature=-windowed",
+    "-C", "link-arg=-Wl,-z,noexecstack",
+]
 
-[build.env]
-RUSTFLAGS = "-C link-arg=-T../../kernel/linker.ld"
+[unstable]
+build-std = ["core"]
