@@ -4,6 +4,14 @@
 
 use core::panic::PanicInfo;
 
+pub mod drivers {
+    pub mod uart;
+    pub mod spi;
+    pub mod delay;
+    pub mod sd;
+}
+pub mod shell;
+
 extern "C" {
     static mut _bss_start: u32;
     static mut _bss_end: u32;
@@ -13,7 +21,9 @@ extern "C" {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    crate::println!("!!! KERNEL PANIC !!!");
+    crate::println!("{}", info);
     loop {}
 }
 
@@ -27,8 +37,6 @@ const fn to_array_32(s: &[u8]) -> [u8; 32] {
     arr
 }
 
-/// esp_app_desc_t — required at DROM base + 0x20 so the bootloader can find it.
-/// Placed in .rodata_desc which is the very first thing in the DROM segment.
 #[repr(C)]
 pub struct esp_app_desc_t {
     pub magic_word: u32,
@@ -69,21 +77,83 @@ pub static esp_app_desc: esp_app_desc_t = esp_app_desc_t {
     reserv2: [0; 18],
 };
 
-/// Kernel entry point — runs after bootloader maps IROM via MMU.
-/// UART0 TX FIFO is at 0x3FF40000. We write bytes directly; no UART init
-/// needed for basic TX at the reset baud rate (115200).
+unsafe fn init_memory() {
+    let mut src = &raw const _data_load;
+    let mut dest = &raw mut _data_start;
+    let end = &raw mut _data_end;
+    while dest < end {
+        core::ptr::write_volatile(dest, core::ptr::read_volatile(src));
+        dest = dest.add(1);
+        src = src.add(1);
+    }
+    let mut dest = &raw mut _bss_start;
+    let end = &raw mut _bss_end;
+    while dest < end {
+        core::ptr::write_volatile(dest, 0);
+        dest = dest.add(1);
+    }
+}
+
+pub unsafe fn wdt_feed() {
+    const RTC_CNTL_WDTWPROTECT: *mut u32 = 0x3FF480A4 as *mut u32;
+    const RTC_CNTL_WDTFEED: *mut u32 = 0x3FF480A0 as *mut u32;
+    core::ptr::write_volatile(RTC_CNTL_WDTWPROTECT, 0x50D83AA1);
+    core::ptr::write_volatile(RTC_CNTL_WDTFEED, 1);
+    core::ptr::write_volatile(RTC_CNTL_WDTWPROTECT, 0);
+}
+
+unsafe fn disable_wdt() {
+    const RTC_CNTL_WDTWPROTECT: *mut u32 = 0x3FF480A4 as *mut u32;
+    const RTC_CNTL_WDTCONFIG0:  *mut u32 = 0x3FF48094 as *mut u32;
+    const RTC_CNTL_WDTCONFIG1:  *mut u32 = 0x3FF48098 as *mut u32;
+    const RTC_CNTL_WDTFEED:     *mut u32 = 0x3FF480A0 as *mut u32;
+    const RTC_CNTL_BROWN_OUT:   *mut u32 = 0x3FF4808C as *mut u32;
+    const TIMG0_WDTWPROTECT:    *mut u32 = 0x3FF5F064 as *mut u32;
+    const TIMG0_WDTCONFIG0:     *mut u32 = 0x3FF5F048 as *mut u32;
+
+    core::ptr::write_volatile(RTC_CNTL_WDTWPROTECT, 0x50D83AA1);
+    core::ptr::write_volatile(RTC_CNTL_BROWN_OUT, 0);
+
+    core::ptr::write_volatile(RTC_CNTL_WDTCONFIG0, 0);
+    core::ptr::write_volatile(RTC_CNTL_WDTCONFIG1, 0xFFFFFFFF);
+    core::ptr::write_volatile(RTC_CNTL_WDTFEED, 1);
+    core::ptr::write_volatile(RTC_CNTL_WDTWPROTECT, 0);
+
+    core::ptr::write_volatile(TIMG0_WDTWPROTECT, 0x50D83AA1);
+    core::ptr::write_volatile(TIMG0_WDTCONFIG0, 0);
+    core::ptr::write_volatile(TIMG0_WDTWPROTECT, 0);
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     unsafe {
-        let uart0_fifo = 0x3FF40000 as *mut u32;
-        let msg = b"Espresso\r\n";
-        loop {
-            for &b in msg {
-                core::ptr::write_volatile(uart0_fifo, b as u32);
-            }
-            for _ in 0..10_000_000u32 {
-                core::arch::asm!("nop");
-            }
+        init_memory();
+        drivers::uart::RawUart::init();
+        disable_wdt();
+
+        crate::println!("");
+        crate::println!("======================================");
+        crate::println!("Espresso OS — Boot Sequence");
+        crate::println!("======================================");
+
+        // SPI init (VSPI, software CS on GPIO5)
+        crate::println!("[1/2] SPI init (400 kHz, SW CS GPIO5)...");
+        drivers::spi::spi_init();
+
+        // SD card init (diagnostic + embedded-sdmmc mount)
+        crate::println!("[2/2] SD card init...");
+        match drivers::sd::init_fs() {
+            Ok(()) => crate::println!("[2/2] SD card mounted OK"),
+            Err(e) => crate::println!("[2/2] SD card FAILED: {}", e),
         }
+
+        crate::println!("======================================");
+        crate::println!("Boot complete, launching shell.");
+        crate::println!("");
+
+        shell::start_shell();
+
+        crate::println!("Shell halted. Idle.");
+        loop { core::arch::asm!("nop"); }
     }
 }

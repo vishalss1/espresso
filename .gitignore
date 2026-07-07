@@ -34,3 +34,9 @@ espflash.toml
 # Linker intermediate objects
 *.o
 *.a
+
+ESPRESSO_SPI_MISO_STATUS_REPORT.md
+spi_hal.c
+spi_master.c
+SPI_MISO_Test_Log.md
+transcript.txt
