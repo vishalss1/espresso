@@ -40,3 +40,5 @@ spi_hal.c
 spi_master.c
 SPI_MISO_Test_Log.md
 transcript.txt
+output.md
+summary.md
