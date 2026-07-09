@@ -29,6 +29,7 @@ const CMD0: u8 = 0x00;
 const CMD8: u8 = 0x08;
 const CMD9: u8 = 0x09;
 const CMD17: u8 = 0x11;
+const CMD24: u8 = 0x18;
 const CMD55: u8 = 0x37;
 const CMD58: u8 = 0x3A;
 const ACMD41: u8 = 0x29;
@@ -228,6 +229,28 @@ impl RawSdCard {
         Ok(())
     }
 
+    /// Write 512-byte data block + 2 dummy CRC bytes. CS must already be held LOW.
+    /// CMD24 must have already been sent and its R1 verified.
+    fn write_data_block(buf: &[u8; 512]) -> Result<(), SdError> {
+        spi_write(&[DATA_TOKEN]);
+        for chunk in buf.chunks(64) {
+            spi_write(chunk);
+        }
+        spi_write(&[0xFF, 0xFF]);
+
+        let resp = spi_read_byte();
+        if (resp & 0x1F) != 0x05 {
+            return Err(SdError::WriteError);
+        }
+
+        for _ in 0..100000 {
+            if spi_read_byte() == 0xFF {
+                return Ok(());
+            }
+        }
+        Err(SdError::Timeout)
+    }
+
     fn adjust_block_idx(&self, idx: BlockIdx) -> u32 {
         match *self.card_type.borrow() {
             Some(CardType::Sd1 | CardType::Sd2) => idx.0 * 512,
@@ -301,8 +324,28 @@ impl BlockDevice for RawSdCard {
         Ok(())
     }
 
-    fn write(&self, _blocks: &[Block], _start_block_idx: BlockIdx) -> Result<(), Self::Error> {
-        Err(SdError::WriteError)
+    fn write(&self, blocks: &[Block], start_block_idx: BlockIdx) -> Result<(), Self::Error> {
+        if self.card_type.borrow().is_none() {
+            return Err(SdError::CardNotFound);
+        }
+
+        let start_idx = self.adjust_block_idx(start_block_idx);
+
+        RawSpi::cs_low();
+
+        if blocks.len() == 1 {
+            let _r1 = Self::cmd_sticky(CMD24, start_idx)?;
+            Self::write_data_block(&blocks[0].contents)?;
+        } else {
+            for (i, block) in blocks.iter().enumerate() {
+                let _r1 = Self::cmd_sticky(CMD24, start_idx + i as u32)?;
+                Self::write_data_block(&block.contents)?;
+            }
+        }
+
+        RawSpi::cs_high();
+        let _ = spi_read_byte();
+        Ok(())
     }
 
     fn num_blocks(&self) -> Result<BlockCount, Self::Error> {
@@ -392,7 +435,10 @@ pub fn is_mounted() -> bool {
 pub fn list_dir(_path: &str) -> Result<(), &'static str> {
     unsafe {
         let mgr = (*(&raw mut VOLUME_MGR)).as_mut().ok_or("ERR_NO_SD")?;
-        let mut volume = mgr.open_volume(VolumeIdx(0)).map_err(|_| "Failed to open Volume 0")?;
+        let mut volume = mgr.open_volume(VolumeIdx(0)).map_err(|e| {
+            crate::println!("  [SD] open_volume error: {:?}", e);
+            "Failed to open Volume 0"
+        })?;
         let mut root_dir = volume.open_root_dir().map_err(|_| "Failed to open root directory")?;
 
         crate::println!("Files on SD card root:");
@@ -410,7 +456,10 @@ pub fn list_dir(_path: &str) -> Result<(), &'static str> {
 pub fn cat_file(path: &str) -> Result<(), &'static str> {
     unsafe {
         let mgr = (*(&raw mut VOLUME_MGR)).as_mut().ok_or("ERR_NO_SD")?;
-        let mut volume = mgr.open_volume(VolumeIdx(0)).map_err(|_| "Failed to open Volume 0")?;
+        let mut volume = mgr.open_volume(VolumeIdx(0)).map_err(|e| {
+            crate::println!("  [SD] open_volume error: {:?}", e);
+            "Failed to open Volume 0"
+        })?;
         let mut root_dir = volume.open_root_dir().map_err(|_| "Failed to open root directory")?;
         let mut file = root_dir
             .open_file_in_dir(path, embedded_sdmmc::Mode::ReadOnly)
