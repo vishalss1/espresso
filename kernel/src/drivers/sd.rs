@@ -1,7 +1,12 @@
-use crate::drivers::spi::RawSpi;
-use crate::drivers::delay::RawDelay;
+use core::cell::RefCell;
 use embedded_hal::delay::DelayNs;
-use embedded_sdmmc::{SdCard, VolumeManager, VolumeIdx, Mode, TimeSource, Timestamp};
+use embedded_hal::spi::{Operation, SpiDevice};
+use embedded_sdmmc::{Block, BlockCount, BlockDevice, BlockIdx, TimeSource, Timestamp, VolumeIdx, VolumeManager};
+
+use crate::drivers::delay::RawDelay;
+use crate::drivers::spi::RawSpi;
+
+// ── Time source ────────────────────────────────────────────────────────────────
 
 pub struct DummyTimeSource;
 
@@ -18,109 +23,385 @@ impl TimeSource for DummyTimeSource {
     }
 }
 
-use embedded_sdmmc::{Block, BlockIdx, BlockCount, BlockDevice};
+// ── SD protocol constants ──────────────────────────────────────────────────────
 
-pub struct DiagnosticBlockDevice<T: BlockDevice> {
-    inner: T,
+const CMD0: u8 = 0x00;
+const CMD8: u8 = 0x08;
+const CMD9: u8 = 0x09;
+const CMD17: u8 = 0x11;
+const CMD55: u8 = 0x37;
+const CMD58: u8 = 0x3A;
+const ACMD41: u8 = 0x29;
+
+const R1_IDLE: u8 = 0x01;
+const R1_READY: u8 = 0x00;
+const R1_ILLEGAL_CMD: u8 = 0x04;
+
+const DATA_TOKEN: u8 = 0xFE;
+
+fn crc7(data: &[u8]) -> u8 {
+    let mut crc = 0u8;
+    for mut d in data.iter().cloned() {
+        for _ in 0..8 {
+            crc <<= 1;
+            if ((d & 0x80) ^ (crc & 0x80)) != 0 {
+                crc ^= 0x09;
+            }
+            d <<= 1;
+        }
+    }
+    (crc << 1) | 1
 }
 
-impl<T: BlockDevice> BlockDevice for DiagnosticBlockDevice<T> {
-    type Error = T::Error;
+// ── Error type ─────────────────────────────────────────────────────────────────
 
-    fn read(&self, blocks: &mut [Block], start_block_idx: BlockIdx, reason: &str) -> Result<(), Self::Error> {
-        crate::println!("[SD Block Device] read block start={:?} (count={}) for: {}", start_block_idx, blocks.len(), reason);
-        let res = self.inner.read(blocks, start_block_idx, reason);
-        match &res {
-            Ok(()) => crate::println!("[SD Block Device] read block success"),
-            Err(e) => crate::println!("[SD Block Device] read block error: {:?}", e),
+#[derive(Debug, Copy, Clone)]
+pub enum SdError {
+    Timeout,
+    CardNotFound,
+    ReadError,
+    WriteError,
+    CmdError,
+}
+
+// ── Card type ──────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum CardType {
+    Sd1,
+    Sd2,
+    Sdhc,
+}
+
+// ── RawSdCard: custom BlockDevice with correct CS management ─────────────────
+
+pub struct RawSdCard {
+    card_type: RefCell<Option<CardType>>,
+}
+
+impl RawSdCard {
+    pub fn new() -> RawSdCard {
+        RawSdCard {
+            card_type: RefCell::new(None),
         }
-        res
     }
 
-    fn write(&self, blocks: &[Block], start_block_idx: BlockIdx) -> Result<(), Self::Error> {
-        crate::println!("[SD Block Device] write block start={:?} (count={})", start_block_idx, blocks.len());
-        let res = self.inner.write(blocks, start_block_idx);
-        match &res {
-            Ok(()) => crate::println!("[SD Block Device] write block success"),
-            Err(e) => crate::println!("[SD Block Device] write block error: {:?}", e),
+    /// Send a command and read response, using SpiDevice::transaction()
+    /// with Write + Transfer operations (same pattern as embedded-sdmmc).
+    ///
+    /// Returns (R1, optional extra bytes). For CMD8/CMD58, extra = 4 bytes
+    /// (R7/R3). Everything in a single CS transaction.
+    fn cmd_transaction(command: u8, arg: u32) -> Result<(u8, Option<[u8; 4]>), SdError> {
+        let mut buf = [
+            0x40 | command,
+            (arg >> 24) as u8,
+            (arg >> 16) as u8,
+            (arg >> 8) as u8,
+            arg as u8,
+            0,
+        ];
+        buf[5] = crc7(&buf[0..5]);
+
+        let mut resp = [0xFFu8; 16];
+
+        let mut spi = RawSpi;
+        spi.transaction(&mut [
+            Operation::Write(&buf),
+            Operation::Transfer(&mut resp, &[0xFFu8; 16]),
+        ])
+        .ok();
+
+        for i in 0..resp.len() {
+            if resp[i] & 0x80 == 0 {
+                let r1 = resp[i];
+                let extra = if (command == CMD8 || command == CMD58) && i + 4 < resp.len() {
+                    Some([resp[i + 1], resp[i + 2], resp[i + 3], resp[i + 4]])
+                } else {
+                    None
+                };
+                return Ok((r1, extra));
+            }
         }
-        res
+        Err(SdError::Timeout)
+    }
+
+    /// Initialize card using transaction-based commands.
+    pub fn init(&self) -> Result<(), SdError> {
+        let mut delay = RawDelay;
+        delay.delay_ms(500);
+
+        // 80 dummy clocks with CS HIGH (use transfer() directly, no CS toggle)
+        RawSpi::cs_high();
+        for _ in 0..10 {
+            RawSpi::transfer(Some(&[0xFF]), None::<&mut [u8]>, 1);
+        }
+
+        // CMD0
+        Self::cmd_transaction(CMD0, 0)?;
+
+        // CMD8
+        let (r, maybe_r7) = Self::cmd_transaction(CMD8, 0x1AA)?;
+        let card_type: CardType;
+        let acmd41_arg: u32;
+        if r == (R1_IDLE | R1_ILLEGAL_CMD) {
+            card_type = CardType::Sd1;
+            acmd41_arg = 0;
+        } else {
+            let r7 = maybe_r7.ok_or(SdError::CardNotFound)?;
+            if r7[3] != 0xAA {
+                return Err(SdError::CardNotFound);
+            }
+            card_type = CardType::Sd2;
+            acmd41_arg = 0x4000_0000;
+        }
+
+        // ACMD41 loop
+        for _ in 0..10000 {
+            let (r, _) = Self::cmd_transaction(CMD55, 0)?;
+            if r & 0x80 != 0 {
+                return Err(SdError::Timeout);
+            }
+            let (r, _) = Self::cmd_transaction(ACMD41, acmd41_arg)?;
+            if r == R1_READY {
+                break;
+            }
+            delay.delay_us(10);
+        }
+
+        // CMD58 for SDHC/SDXC detection
+        if card_type == CardType::Sd2 {
+            let (r1, maybe_ocr) = Self::cmd_transaction(CMD58, 0)?;
+            if r1 != 0 {
+                return Err(SdError::CmdError);
+            }
+            let ocr = maybe_ocr.ok_or(SdError::CmdError)?;
+            if (ocr[0] & 0xC0) == 0xC0 {
+                *self.card_type.borrow_mut() = Some(CardType::Sdhc);
+            } else {
+                *self.card_type.borrow_mut() = Some(CardType::Sd2);
+            }
+        } else {
+            *self.card_type.borrow_mut() = Some(card_type);
+        }
+        Ok(())
+    }
+
+    /// Send a command with CS held LOW (used during block read/write).
+    fn cmd_sticky(command: u8, arg: u32) -> Result<u8, SdError> {
+        let mut buf = [
+            0x40 | command,
+            (arg >> 24) as u8,
+            (arg >> 16) as u8,
+            (arg >> 8) as u8,
+            arg as u8,
+            0,
+        ];
+        buf[5] = crc7(&buf[0..5]);
+
+        spi_write(&buf);
+        for _ in 0..10000 {
+            let r = spi_read_byte();
+            if r & 0x80 == 0 {
+                return Ok(r);
+            }
+        }
+        Err(SdError::Timeout)
+    }
+
+    /// Read 512-byte data block + 2 CRC bytes. CS must already be held LOW.
+    fn read_data_block(buf: &mut [u8; 512]) -> Result<(), SdError> {
+        for _ in 0..10000 {
+            let s = spi_read_byte();
+            if s != 0xFF {
+                if s == DATA_TOKEN {
+                    break;
+                }
+                return Err(SdError::ReadError);
+            }
+        }
+        for b in buf.iter_mut() {
+            *b = 0xFF;
+        }
+        spi_transfer_in_place(buf);
+        let _ = spi_read_byte();
+        let _ = spi_read_byte();
+        Ok(())
+    }
+
+    fn adjust_block_idx(&self, idx: BlockIdx) -> u32 {
+        match *self.card_type.borrow() {
+            Some(CardType::Sd1 | CardType::Sd2) => idx.0 * 512,
+            Some(CardType::Sdhc) => idx.0,
+            None => idx.0,
+        }
+    }
+
+    fn read_csd(&self) -> Result<[u8; 16], SdError> {
+        let mut buf = [0x40 | CMD9, 0, 0, 0, 0, 0];
+        buf[5] = crc7(&buf[0..5]);
+
+        RawSpi::cs_low();
+        spi_write(&buf);
+        for _ in 0..10000 {
+            let r = spi_read_byte();
+            if r & 0x80 == 0 {
+                break;
+            }
+        }
+        for _ in 0..10000 {
+            let s = spi_read_byte();
+            if s != 0xFF {
+                if s == DATA_TOKEN {
+                    break;
+                }
+                RawSpi::cs_high();
+                return Err(SdError::ReadError);
+            }
+        }
+        let mut csd = [0xFFu8; 16];
+        spi_transfer_in_place(&mut csd);
+        let _ = spi_read_byte();
+        let _ = spi_read_byte();
+        RawSpi::cs_high();
+        let _ = spi_read_byte();
+        Ok(csd)
+    }
+}
+
+impl BlockDevice for RawSdCard {
+    type Error = SdError;
+
+    fn read(
+        &self,
+        blocks: &mut [Block],
+        start_block_idx: BlockIdx,
+        _reason: &str,
+    ) -> Result<(), Self::Error> {
+        if self.card_type.borrow().is_none() {
+            return Err(SdError::CardNotFound);
+        }
+
+        let start_idx = self.adjust_block_idx(start_block_idx);
+
+        RawSpi::cs_low();
+
+        if blocks.len() == 1 {
+            Self::cmd_sticky(CMD17, start_idx)?;
+            Self::read_data_block(&mut blocks[0].contents)?;
+        } else {
+            Self::cmd_sticky(0x12, start_idx)?;
+            for block in blocks.iter_mut() {
+                Self::read_data_block(&mut block.contents)?;
+            }
+            Self::cmd_sticky(0x0C, 0)?;
+        }
+
+        RawSpi::cs_high();
+        let _ = spi_read_byte();
+        Ok(())
+    }
+
+    fn write(&self, _blocks: &[Block], _start_block_idx: BlockIdx) -> Result<(), Self::Error> {
+        Err(SdError::WriteError)
     }
 
     fn num_blocks(&self) -> Result<BlockCount, Self::Error> {
-        crate::println!("[SD Block Device] num_blocks query...");
-        let res = self.inner.num_blocks();
-        match &res {
-            Ok(count) => crate::println!("[SD Block Device] num_blocks count={:?}", count),
-            Err(e) => crate::println!("[SD Block Device] num_blocks error: {:?}", e),
+        if self.card_type.borrow().is_none() {
+            return Err(SdError::CardNotFound);
         }
-        res
+        let csd = self.read_csd()?;
+        let csd_ver = (csd[0] >> 6) & 0x03;
+        if csd_ver == 1 {
+            let size = ((csd[7] as u32 & 0x3F) << 16) | (csd[8] as u32) << 8 | csd[9] as u32;
+            Ok(BlockCount((size + 1) * 1024))
+        } else {
+            let c_size = ((csd[6] as u32 & 0x03) << 10)
+                | (csd[7] as u32) << 2
+                | ((csd[8] as u32 >> 6) & 0x03);
+            let c_size_mult = ((csd[9] as u32 & 0x03) << 1) | ((csd[10] as u32 >> 7) & 0x01);
+            let read_bl_len = (csd[5] & 0x0F) as u32;
+            let mult = c_size_mult + read_bl_len - 7;
+            Ok(BlockCount((c_size + 1) << mult))
+        }
     }
 }
 
-type SdCardType = SdCard<RawSpi, RawDelay>;
-type DiagBlockDeviceType = DiagnosticBlockDevice<SdCardType>;
-type VolumeManagerType = VolumeManager<DiagBlockDeviceType, DummyTimeSource>;
+// ── SPI helpers (no CS toggling) ───────────────────────────────────────────────
 
-pub static mut FILE_SYSTEM: Option<VolumeManagerType> = None;
+fn spi_write(buf: &[u8]) {
+    RawSpi::transfer(Some(buf), None::<&mut [u8]>, buf.len());
+}
+
+fn spi_read_byte() -> u8 {
+    let mut r = [0xFF];
+    RawSpi::transfer(Some(&[0xFF]), Some(&mut r), 1);
+    r[0]
+}
+
+fn spi_transfer_in_place(buf: &mut [u8]) {
+    RawSpi::transfer_in_place(buf, buf.len());
+}
+
+// ── Volume manager type alias ──────────────────────────────────────────────────
+
+type VolumeManagerType = VolumeManager<RawSdCard, DummyTimeSource>;
+
+pub static mut VOLUME_MGR: Option<VolumeManagerType> = None;
+
+// ── Public API ─────────────────────────────────────────────────────────────────
 
 pub fn init_fs() -> Result<(), &'static str> {
-    let mut delay = RawDelay;
-    delay.delay_ms(500);
+    crate::println!("[SD] Initializing RawSdCard...");
+    let sdcard = RawSdCard::new();
+    sdcard.init().map_err(|e| {
+        crate::println!("[SD] Card init failed: {:?}", e);
+        "ERR_CARD_NOT_FOUND"
+    })?;
 
-    // Diagnostic: run the full SD init sequence via raw SPI commands
-    // This prints per-command status so we can see exactly where init fails.
-    crate::println!("[SD] Initiating card via raw SPI commands...");
-    if let Err(e) = RawSpi::card_reset() {
-        crate::println!("[SD] Raw card init failed: {}", e);
-        return Err("ERR_RAW_INIT_FAILED");
-    }
-    crate::println!("[SD] Raw card init succeeded");
-
-    // Hand off to embedded-sdmmc for the actual volume manager mount.
-    crate::println!("[SD] Calling SdCard::new()...");
-    let sdcard = SdCard::new(RawSpi, RawDelay);
-    crate::println!("[SD] SdCard::new() returned");
-
-    crate::println!("[SD] Wrapping SdCard in DiagnosticBlockDevice...");
-    let diag_card = DiagnosticBlockDevice { inner: sdcard };
-
-    crate::println!("[SD] Calling VolumeManager::new()...");
-    let volume_mgr = VolumeManager::new(diag_card, DummyTimeSource);
-    crate::println!("[SD] VolumeManager::new() returned");
+    crate::println!("[SD] Card initialized, creating VolumeManager...");
+    let volume_mgr = VolumeManager::new(sdcard, DummyTimeSource);
 
     unsafe {
-        FILE_SYSTEM = Some(volume_mgr);
-        let fs = (*(&raw mut FILE_SYSTEM)).as_mut().unwrap();
-        crate::println!("[SD] Calling open_volume(VolumeIdx(0))...");
-        let mount_res = fs.open_volume(VolumeIdx(0));
-        crate::println!("[SD] open_volume(0) returned");
-        match mount_res {
+        VOLUME_MGR = Some(volume_mgr);
+        let mgr = (*(&raw mut VOLUME_MGR)).as_mut().unwrap();
+
+        crate::println!("[SD] Opening volume 0...");
+        match mgr.open_volume(VolumeIdx(0)) {
             Ok(_) => {
                 crate::println!("[SD] Volume 0 mounted OK");
-                RawSpi::set_speed_high(); // Switch to 10 MHz high speed post-mount
+                RawSpi::set_speed_high();
+                crate::println!("[SD] Switched to 10 MHz");
                 Ok(())
             }
             Err(e) => {
                 crate::println!("[SD] open_volume(0) failed: {:?}", e);
-                FILE_SYSTEM = None;
+                VOLUME_MGR = None;
                 Err("ERR_VOLUME_MOUNT_FAILED")
             }
         }
     }
 }
 
+pub fn is_mounted() -> bool {
+    unsafe {
+        let ptr = &raw const VOLUME_MGR;
+        (*ptr).is_some()
+    }
+}
+
 pub fn list_dir(_path: &str) -> Result<(), &'static str> {
     unsafe {
-        let fs = (*(&raw mut FILE_SYSTEM)).as_mut().ok_or("ERR_NO_SD")?;
-        let mut volume = fs.open_volume(VolumeIdx(0)).map_err(|_| "Failed to open Volume 0")?;
+        let mgr = (*(&raw mut VOLUME_MGR)).as_mut().ok_or("ERR_NO_SD")?;
+        let mut volume = mgr.open_volume(VolumeIdx(0)).map_err(|_| "Failed to open Volume 0")?;
         let mut root_dir = volume.open_root_dir().map_err(|_| "Failed to open root directory")?;
 
         crate::println!("Files on SD card root:");
-        root_dir.iterate_dir(|entry| {
-            let dir_indicator = if entry.attributes.is_directory() { "/" } else { "" };
-            crate::println!("  {}{:<24}  {} bytes", entry.name, dir_indicator, entry.size);
-        }).map_err(|_| "Failed to iterate directory")?;
+        root_dir
+            .iterate_dir(|entry| {
+                let dir_indicator = if entry.attributes.is_directory() { "/" } else { "" };
+                crate::println!("  {}{:<24}  {} bytes", entry.name, dir_indicator, entry.size);
+            })
+            .map_err(|_| "Failed to iterate directory")?;
 
         Ok(())
     }
@@ -128,33 +409,28 @@ pub fn list_dir(_path: &str) -> Result<(), &'static str> {
 
 pub fn cat_file(path: &str) -> Result<(), &'static str> {
     unsafe {
-        let fs = (*(&raw mut FILE_SYSTEM)).as_mut().ok_or("ERR_NO_SD")?;
-        let mut volume = fs.open_volume(VolumeIdx(0)).map_err(|_| "Failed to open Volume 0")?;
+        let mgr = (*(&raw mut VOLUME_MGR)).as_mut().ok_or("ERR_NO_SD")?;
+        let mut volume = mgr.open_volume(VolumeIdx(0)).map_err(|_| "Failed to open Volume 0")?;
         let mut root_dir = volume.open_root_dir().map_err(|_| "Failed to open root directory")?;
         let mut file = root_dir
-            .open_file_in_dir(path, Mode::ReadOnly)
+            .open_file_in_dir(path, embedded_sdmmc::Mode::ReadOnly)
             .map_err(|_| "Failed to open file")?;
 
         let mut buf = [0u8; 128];
         loop {
             let n = file.read(&mut buf).map_err(|_| "Failed to read file")?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
+            let uart = crate::drivers::uart::RawUart;
             for &b in &buf[..n] {
                 if b == b'\n' {
-                    crate::drivers::uart::RawUart.write_byte(b'\r');
+                    uart.write_byte(b'\r');
                 }
-                crate::drivers::uart::RawUart.write_byte(b);
+                uart.write_byte(b);
             }
         }
         crate::println!();
         Ok(())
     }
 }
-
-pub fn is_mounted() -> bool {
-    unsafe {
-        let ptr = &raw const FILE_SYSTEM;
-        (*ptr).is_some()
-    }
-}
-
