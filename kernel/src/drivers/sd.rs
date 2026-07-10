@@ -432,6 +432,38 @@ pub fn is_mounted() -> bool {
     }
 }
 
+pub fn touch_file(path: &str) -> Result<(), &'static str> {
+    unsafe {
+        let mgr = (*(&raw mut VOLUME_MGR)).as_mut().ok_or("ERR_NO_SD")?;
+        let mut volume = mgr.open_volume(VolumeIdx(0)).map_err(|e| {
+            crate::println!("  [SD] open_volume error: {:?}", e);
+            "Failed to open Volume 0"
+        })?;
+        let mut root_dir = volume.open_root_dir().map_err(|_| "Failed to open root directory")?;
+        let _file = root_dir
+            .open_file_in_dir(path, embedded_sdmmc::Mode::ReadWriteCreateOrTruncate)
+            .map_err(|_| "Failed to create file")?;
+        Ok(())
+    }
+}
+
+pub fn write_file(path: &str, content: &[u8]) -> Result<(), &'static str> {
+    unsafe {
+        let mgr = (*(&raw mut VOLUME_MGR)).as_mut().ok_or("ERR_NO_SD")?;
+        let mut volume = mgr.open_volume(VolumeIdx(0)).map_err(|e| {
+            crate::println!("  [SD] open_volume error: {:?}", e);
+            "Failed to open Volume 0"
+        })?;
+        let mut root_dir = volume.open_root_dir().map_err(|_| "Failed to open root directory")?;
+        let mut file = root_dir
+            .open_file_in_dir(path, embedded_sdmmc::Mode::ReadWriteCreateOrTruncate)
+            .map_err(|_| "Failed to open file for writing")?;
+        file.write(content).map_err(|_| "Failed to write to file")?;
+        file.close().map_err(|_| "Failed to close file")?;
+        Ok(())
+    }
+}
+
 pub fn list_dir(_path: &str) -> Result<(), &'static str> {
     unsafe {
         let mgr = (*(&raw mut VOLUME_MGR)).as_mut().ok_or("ERR_NO_SD")?;

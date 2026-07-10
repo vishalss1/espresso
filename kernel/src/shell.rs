@@ -2,7 +2,7 @@
 //! Supports basic line editing, input echo, backspace, and FAT32 commands (ls, cat).
 
 use crate::drivers::uart::RawUart;
-use crate::drivers::sd::{list_dir, cat_file, is_mounted};
+use crate::drivers::sd::{list_dir, cat_file, is_mounted, touch_file, write_file};
 
 pub const HISTORY_SIZE: usize = 20;
 pub const PROMPT: &str = "espresso# ";
@@ -66,6 +66,8 @@ fn execute_command(cmd_str: &str) {
                 if is_mounted() {
                     crate::println!("  ls             List root directory files on the SD card");
                     crate::println!("  cat <file>     Display contents of a file on the SD card");
+                    crate::println!("  touch <file>   Create an empty file");
+                    crate::println!("  echo \"...\" > <file>  Write text to a file");
                 }
                 crate::println!("  help           Show this help message");
             }
@@ -81,6 +83,40 @@ fn execute_command(cmd_str: &str) {
                     }
                 } else {
                     crate::println!("Usage: cat <filename>");
+                }
+            }
+            "touch" if is_mounted() => {
+                if let Some(filename) = parts.next() {
+                    if let Err(e) = touch_file(filename) {
+                        crate::println!("touch error: {}", e);
+                    }
+                } else {
+                    crate::println!("Usage: touch <filename>");
+                }
+            }
+            "echo" if is_mounted() => {
+                let rest = cmd_str[4..].trim_start();
+                if rest.starts_with('"') {
+                    if let Some(end_quote) = rest[1..].find('"') {
+                        let text = &rest[1..1 + end_quote];
+                        let after_quote = rest[2 + end_quote..].trim_start();
+                        if after_quote.starts_with('>') {
+                            let path = after_quote[1..].trim_start();
+                            if !path.is_empty() {
+                                if let Err(e) = write_file(path, text.as_bytes()) {
+                                    crate::println!("echo error: {}", e);
+                                }
+                            } else {
+                                crate::println!("Usage: echo \"<text>\" > <path>");
+                            }
+                        } else {
+                            crate::println!("Usage: echo \"<text>\" > <path>");
+                        }
+                    } else {
+                        crate::println!("echo: unclosed quote");
+                    }
+                } else {
+                    crate::println!("Usage: echo \"<text>\" > <path>");
                 }
             }
             _ => {
