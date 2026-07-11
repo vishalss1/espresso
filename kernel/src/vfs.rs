@@ -1,0 +1,145 @@
+//! Virtual filesystem - single namespace over all peripherals
+
+pub const MAX_VFS_ENTRIES: usize = 16;
+pub const MAX_PATH_LEN: usize = 64;
+
+pub struct VfsEntry {
+    pub path: [u8; MAX_PATH_LEN],
+    pub path_len: u8,
+    pub handler: VfsHandler,
+}
+
+pub enum VfsHandler {
+    SdCard,
+    GpioRead(u8),
+    GpioWrite(u8),
+    GpioMode(u8),
+    I2cRead,
+    I2cWrite,
+    SpiRead,
+    SpiWrite,
+    ProcTasks,
+    ProcMem,
+    ProcLog,
+    ProcCaps,
+    ProcCrash,
+}
+
+pub static mut VFS_TABLE: [VfsEntry; MAX_VFS_ENTRIES] = [
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+];
+
+pub fn register_entry(path: &str, handler: VfsHandler) -> Result<(), &'static str> {
+    unsafe {
+        let slot = VFS_TABLE.iter_mut().find(|e| e.path_len == 0).ok_or("ERR_VFS_FULL")?;
+        let bytes = path.as_bytes();
+        let len = core::cmp::min(bytes.len(), MAX_PATH_LEN - 1);
+        slot.path[..len].copy_from_slice(&bytes[..len]);
+        slot.path[len] = 0;
+        slot.path_len = len as u8;
+        slot.handler = handler;
+        Ok(())
+    }
+}
+
+pub fn resolve(path: &str) -> Option<&'static VfsEntry> {
+    unsafe {
+        for entry in VFS_TABLE.iter() {
+            if entry.path_len == 0 { continue; }
+            let entry_path = core::str::from_utf8(&entry.path[..entry.path_len as usize]).unwrap_or("");
+            if path.starts_with(entry_path) { return Some(entry); }
+        }
+        None
+    }
+}
+
+pub fn init_vfs() {
+    unsafe {
+        for entry in VFS_TABLE.iter_mut() { entry.path_len = 0; entry.path[..].fill(0); }
+    }
+    let _ = register_entry("/sd", VfsHandler::SdCard);
+    let _ = register_entry("/dev/gpio", VfsHandler::GpioRead(0));
+    let _ = register_entry("/dev/i2c", VfsHandler::I2cRead);
+    let _ = register_entry("/dev/spi", VfsHandler::SpiRead);
+    let _ = register_entry("/proc/tasks", VfsHandler::ProcTasks);
+    let _ = register_entry("/proc/mem", VfsHandler::ProcMem);
+    let _ = register_entry("/proc/log", VfsHandler::ProcLog);
+    let _ = register_entry("/proc/caps", VfsHandler::ProcCaps);
+    let _ = register_entry("/proc/crash", VfsHandler::ProcCrash);
+}
+
+pub fn vfs_open(path: &str, _flags: u32) -> Result<i32, &'static str> {
+    match resolve(path) {
+        Some(entry) => {
+            match &entry.handler {
+                VfsHandler::SdCard => Ok(0),
+                VfsHandler::GpioRead(pin) => Ok(*pin as i32),
+                VfsHandler::ProcTasks => Ok(100),
+                VfsHandler::ProcMem => Ok(101),
+                VfsHandler::ProcLog => Ok(102),
+                VfsHandler::ProcCaps => Ok(103),
+                VfsHandler::ProcCrash => Ok(104),
+                _ => Ok(0),
+            }
+        }
+        None => Err("ERR_NOT_FOUND"),
+    }
+}
+
+pub fn vfs_read(fd: i32, buf: &mut [u8]) -> Result<usize, &'static str> {
+    match fd {
+        100 => crate::scheduler::schedule::get_proc_tasks(buf),
+        101 => crate::scheduler::schedule::get_proc_mem(buf),
+        102 => Ok(crate::event_log::drain_log(buf)),
+        103 => {
+            let pid = unsafe { crate::scheduler::CURRENT_TASK };
+            Ok(crate::caps::query_caps(pid, buf))
+        }
+        104 => Ok(crate::panic_policy::read_crash_log(buf)),
+        0 => {
+            crate::println!("(SD read via VFS not yet routed)");
+            Ok(0)
+        }
+        _ => Err("ERR_BAD_FD"),
+    }
+}
+
+pub fn vfs_write(fd: i32, buf: &[u8]) -> Result<usize, &'static str> {
+    match fd {
+        0 => {
+            crate::drivers::uart::RawUart.write_bytes(buf);
+            Ok(buf.len())
+        }
+        _ => Err("ERR_BAD_FD"),
+    }
+}
+
+pub fn vfs_close(_fd: i32) -> Result<(), &'static str> { Ok(()) }
+
+pub fn vfs_dir_list(path: &str, _buf: &mut [u8]) -> Result<usize, &'static str> {
+    if path.starts_with("/sd") || path == "/" {
+        let _ = crate::drivers::sd::list_dir(path)?;
+        Ok(0)
+    } else {
+        Err("ERR_NOT_FOUND")
+    }
+}
+
+pub fn vfs_file_delete(_path: &str) -> Result<(), &'static str> {
+    Err("ERR_NOT_SUPPORTED")
+}

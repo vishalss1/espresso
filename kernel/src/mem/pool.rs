@@ -1,16 +1,152 @@
-#![no_std]
 //! Memory management module - exec pool allocator
-//! 
-//! Implements first-fit contiguous allocation over 328KB exec pool.
-//! Provides fixed-size pages for program loading and execution.
+//!
+//! 79 pages * 4KB = 316KB, first-fit, 3xu32 bitmap.
+//! No heap. Every allocation is a static, fixed-size page from this pool.
+//! free_count is computed from the bitmap, not stored (avoids struct init issues).
 
-pub struct Page {
-    start: usize,
-    size: usize,
+pub const PAGE_SIZE: usize = 4096;
+pub const TOTAL_PAGES: usize = 79;
+pub const POOL_START: usize = 0x3FFBE000;
+
+#[repr(C)]
+pub struct ExecPool {
+    bitmap: [u32; 3],
 }
 
-pub struct ExecPool {
-    // Bitmapped free/used tracking
-    bitmap: [u8; 12], // 96 bits for 82 pages
-    free_count: usize,
+pub static mut EXEC_POOL: ExecPool = ExecPool { bitmap: [0xFFFFFFFF; 3] };
+
+fn pool_ptr() -> *const ExecPool {
+    &raw const EXEC_POOL
+}
+
+fn pool_mut_ptr() -> *mut ExecPool {
+    &raw mut EXEC_POOL
+}
+
+pub fn free_count() -> usize {
+    unsafe {
+        let p = pool_ptr();
+        let mut count: usize = 0;
+        let mut page: usize = 0;
+        for word_idx in 0..3u32 {
+            let word = (*p).bitmap[word_idx as usize];
+            let mut bits = word;
+            let mut bit_pos: u32 = 0;
+            while bits != 0 && page < TOTAL_PAGES {
+                if bits & 1 != 0 {
+                    count += 1;
+                }
+                bits >>= 1;
+                bit_pos += 1;
+                page += 1;
+            }
+        }
+        count
+    }
+}
+
+pub fn alloc_page() -> Option<usize> {
+    unsafe {
+        let p = pool_mut_ptr();
+        let bitmap = &mut (*p).bitmap;
+
+        for word_idx in 0..3 {
+            if bitmap[word_idx] != 0 {
+                let bit = bitmap[word_idx].trailing_zeros() as usize;
+                let page_idx = word_idx * 32 + bit;
+                if page_idx < TOTAL_PAGES {
+                    bitmap[word_idx] &= !(1 << bit);
+                    return Some(POOL_START + page_idx * PAGE_SIZE);
+                }
+            }
+        }
+        None
+    }
+}
+
+pub fn alloc_pages(count: usize) -> Option<usize> {
+    if count == 0 || count > TOTAL_PAGES {
+        return None;
+    }
+    unsafe {
+        let p = pool_mut_ptr();
+        let bitmap = &mut (*p).bitmap;
+
+        let mut run_start: Option<usize> = None;
+        let mut run_len: usize = 0;
+        for page in 0..TOTAL_PAGES {
+            let word_idx = page / 32;
+            let bit = page % 32;
+            let is_free = bitmap[word_idx] & (1 << bit) != 0;
+
+            if is_free {
+                if run_len == 0 {
+                    run_start = Some(page);
+                }
+                run_len += 1;
+                if run_len == count {
+                    let start = run_start.unwrap();
+                    for p in start..start + count {
+                        let wi = p / 32;
+                        let bi = p % 32;
+                        bitmap[wi] &= !(1 << bi);
+                    }
+                    return Some(POOL_START + start * PAGE_SIZE);
+                }
+            } else {
+                run_start = None;
+                run_len = 0;
+            }
+        }
+        None
+    }
+}
+
+pub fn free_page(addr: usize) {
+    let offset = addr.wrapping_sub(POOL_START);
+    if offset >= TOTAL_PAGES * PAGE_SIZE {
+        return;
+    }
+    let page_idx = offset / PAGE_SIZE;
+    if page_idx >= TOTAL_PAGES {
+        return;
+    }
+    unsafe {
+        let p = pool_mut_ptr();
+        let bitmap = &mut (*p).bitmap;
+        let word_idx = page_idx / 32;
+        let bit = page_idx % 32;
+        bitmap[word_idx] |= 1 << bit;
+    }
+}
+
+/// Explicitly (re)initialize the bitmap. Call after init_memory()
+/// in case .data section was clobbered by the bootloader or BSS zeroing.
+pub fn init_bitmap() {
+    unsafe {
+        let p = pool_mut_ptr();
+        (*p).bitmap = [0xFFFFFFFF; 3];
+    }
+}
+
+/// Dump raw bitmap words for diagnostics.
+pub fn bitmap_words() -> (u32, u32, u32) {
+    unsafe {
+        let p = pool_ptr();
+        ((*p).bitmap[0], (*p).bitmap[1], (*p).bitmap[2])
+    }
+}
+
+pub fn mem_info(buf: &mut [u8]) {
+    unsafe {
+        let p = pool_ptr();
+        let free = free_count();
+        let total = TOTAL_PAGES;
+        let total_bytes = (total * PAGE_SIZE) as u32;
+        let free_bytes = (free * PAGE_SIZE) as u32;
+        if buf.len() >= 8 {
+            buf[0..4].copy_from_slice(&total_bytes.to_le_bytes());
+            buf[4..8].copy_from_slice(&free_bytes.to_le_bytes());
+        }
+    }
 }

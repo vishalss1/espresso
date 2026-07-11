@@ -1,27 +1,22 @@
-#![no_std]
-//! Context switch assembly module - Xtensa task switching
-//! 
-//! Implements context save/restore using Xtensa-specific instructions.
-//! Called from timer interrupt to perform preemptive scheduling.
-//! 
-//! Saves: A0-A15, PC, PS, window registers
-//! Restores: Context of next running task
+# Espresso OS — Xtensa LX6 context switch
+# switch(TaskControlBlock *current, TaskControlBlock *next)
+# a2 = current TCB pointer, a3 = next TCB pointer
+#
+# TCB layout (offsets in bytes):
+#   0x00  pid         (u32)
+#   0x04  state       (u32)
+#   0x08  stack_base  (u32)
+#   0x0C  stack_size  (u32)
+#   0x10  sp          (u32)
+#   0x14  entry       (u32)
+#   0x18  caps        (u32)
 
-.syntax unified
-.arch xtensa	
-.global switch
-
-// Function: void switch(struct Task *current, struct Task *next)
-// Inputs: a0 = current task pointer, a1 = next task pointer
-// Clobbers: all callee-saved registers, PC
+    .text
+    .global switch
+    .align 4
 
 switch:
-    // TODO: Implement context save/restore
-    // 1. Save current task registers to stack
-    // 2. Load next task registers from its stack
-    // 3. Return to new task context
-    movi a2, 0
-    jmp .end
-
-.end:
-    nop
+    entry   a1, 16
+    s32i    a1,  a2, 0x10
+    l32i    a1,  a3, 0x10
+    retw

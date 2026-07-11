@@ -34,6 +34,12 @@ impl RawUart {
         }
     }
 
+    pub fn write_bytes(&self, buf: &[u8]) {
+        for &b in buf {
+            self.write_byte(b);
+        }
+    }
+
     pub fn read_byte(&self) -> Option<u8> {
         unsafe {
             // Check if there are bytes in the RX FIFO (rxfifo_cnt > 0)

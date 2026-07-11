@@ -11,6 +11,22 @@ pub mod drivers {
     pub mod sd;
 }
 pub mod shell;
+pub mod scheduler;
+pub mod mem {
+    pub mod pool;
+}
+pub mod loader;
+pub mod vfs;
+pub mod syscall;
+pub mod event_log;
+pub mod caps;
+pub mod panic_policy;
+pub mod gpio;
+pub mod ipc;
+pub mod tty;
+pub mod keyboard;
+pub mod display;
+pub mod forth;
 
 extern "C" {
     static mut _bss_start: u32;
@@ -24,7 +40,14 @@ extern "C" {
 fn panic(info: &PanicInfo) -> ! {
     crate::println!("!!! KERNEL PANIC !!!");
     crate::println!("{}", info);
-    loop {}
+
+    let msg = "KERNEL PANIC";
+    let pid = unsafe { scheduler::CURRENT_TASK } as u8;
+    crate::panic_policy::write_crash_record(msg, 0, pid);
+    crate::event_log::log_panic(pid);
+    crate::panic_policy::record_crash();
+
+    loop { unsafe { core::arch::asm!("nop"); } }
 }
 
 const fn to_array_32(s: &[u8]) -> [u8; 32] {
@@ -124,10 +147,20 @@ unsafe fn disable_wdt() {
     core::ptr::write_volatile(TIMG0_WDTWPROTECT, 0);
 }
 
+unsafe fn enable_bod() {
+    const RTC_CNTL_BROWN_OUT: *mut u32 = 0x3FF4808C as *mut u32;
+    const RTC_CNTL_BROWN_OUT_REG: *mut u32 = 0x3FF480D0 as *mut u32;
+
+    let threshold = (1 << 9) | (7 << 4) | (1 << 0);
+    core::ptr::write_volatile(RTC_CNTL_BROWN_OUT_REG, threshold);
+    core::ptr::write_volatile(RTC_CNTL_BROWN_OUT, 1 << 31);
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     unsafe {
         init_memory();
+        crate::mem::pool::init_bitmap();
         drivers::uart::RawUart::init();
         disable_wdt();
 
@@ -136,15 +169,33 @@ pub extern "C" fn _start() -> ! {
         crate::println!("Espresso OS — Boot Sequence");
         crate::println!("======================================");
 
-        // SPI init (VSPI, software CS on GPIO5)
-        crate::println!("[1/2] SPI init (400 kHz, SW CS GPIO5)...");
+        crate::println!("[1/7] UART init OK");
+
+        crate::println!("[2/7] Enabling brownout detector...");
+        enable_bod();
+
+        crate::println!("[3/7] SPI init (400 kHz, SW CS GPIO5)...");
         drivers::spi::spi_init();
 
-        // SD card init (diagnostic + embedded-sdmmc mount)
-        crate::println!("[2/2] SD card init...");
+        crate::println!("[4/7] SD card init...");
         match drivers::sd::init_fs() {
-            Ok(()) => crate::println!("[2/2] SD card mounted OK"),
-            Err(e) => crate::println!("[2/2] SD card FAILED: {}", e),
+            Ok(()) => crate::println!("[4/7] SD card mounted OK"),
+            Err(e) => crate::println!("[4/7] SD card FAILED: {}", e),
+        }
+
+        crate::println!("[5/7] Initializing scheduler...");
+        scheduler::init_scheduler();
+
+        crate::println!("[6/7] Initializing subsystems...");
+        vfs::init_vfs();
+        caps::init_caps();
+        event_log::log_boot();
+        ipc::init_queues();
+        panic_policy::init_crash_log();
+
+        crate::println!("[7/7] Checking for crash loops...");
+        if panic_policy::check_crash_loop() {
+            crate::panic_policy::recovery_prompt();
         }
 
         crate::println!("======================================");
@@ -155,5 +206,29 @@ pub extern "C" fn _start() -> ! {
 
         crate::println!("Shell halted. Idle.");
         loop { core::arch::asm!("nop"); }
+    }
+}
+
+pub fn run_program(path: &str) {
+    match loader::load_from_sd(path) {
+        Ok(prog) => {
+            crate::println!("Loaded '{}' @ 0x{:08X}, entry=0x{:08X}, stack={}B",
+                path, prog.base, prog.entry, prog.stack_size);
+            crate::event_log::log_task_spawn(0xFF);
+
+            let entry = prog.entry;
+            let stack = if prog.stack_size > 0 { prog.stack_size } else { 4096 };
+            match scheduler::spawn_task(entry, stack, caps::CAP_ALL) {
+                Ok(pid) => {
+                    crate::println!("Spawned as PID {}", pid);
+                }
+                Err(e) => {
+                    crate::println!("Failed to spawn: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            crate::println!("run error: {}", e);
+        }
     }
 }
