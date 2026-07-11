@@ -17,7 +17,10 @@ pub mod backend {
                     uart.write_byte(b);
                 }
                 TtyBackend::Display => {
-                    // Phase 2: SSD1306 display backend
+                    unsafe {
+                        crate::display::GRID.put_char(b);
+                        crate::display::render(&crate::display::GRID);
+                    }
                 }
             }
         }
@@ -25,3 +28,16 @@ pub mod backend {
 }
 
 pub const TTY_BUF_SIZE: usize = 1024;
+
+/// Write a byte to both backends (UART + display).
+pub fn write_both(b: u8) {
+    backend::TtyBackend::Uart.write_byte(b);
+    backend::TtyBackend::Display.write_byte(b);
+}
+
+/// Write a string to both backends.
+pub fn write_str_both(s: &str) {
+    for &b in s.as_bytes() {
+        write_both(b);
+    }
+}

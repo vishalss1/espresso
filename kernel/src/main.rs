@@ -9,6 +9,7 @@ pub mod drivers {
     pub mod spi;
     pub mod delay;
     pub mod sd;
+    pub mod i2c;
 }
 pub mod shell;
 pub mod scheduler;
@@ -169,33 +170,51 @@ pub extern "C" fn _start() -> ! {
         crate::println!("Espresso OS — Boot Sequence");
         crate::println!("======================================");
 
-        crate::println!("[1/7] UART init OK");
+        crate::println!("[1/9] UART init OK");
 
-        crate::println!("[2/7] Enabling brownout detector...");
+        crate::println!("[2/9] Enabling brownout detector...");
         enable_bod();
 
-        crate::println!("[3/7] SPI init (400 kHz, SW CS GPIO5)...");
+        crate::println!("[3/9] SPI init (400 kHz, SW CS GPIO5)...");
         drivers::spi::spi_init();
 
-        crate::println!("[4/7] SD card init...");
+        crate::println!("[4/9] SD card init...");
         match drivers::sd::init_fs() {
-            Ok(()) => crate::println!("[4/7] SD card mounted OK"),
-            Err(e) => crate::println!("[4/7] SD card FAILED: {}", e),
+            Ok(()) => crate::println!("[4/9] SD card mounted OK"),
+            Err(e) => crate::println!("[4/9] SD card FAILED: {}", e),
         }
 
-        crate::println!("[5/7] Initializing scheduler...");
+        crate::println!("[5/9] I2C init + SH1106 display...");
+        drivers::i2c::init();
+        let i2c_ok = drivers::i2c::write(display::I2C_ADDR, &[0x00, 0xAF]); // display ON cmd
+        crate::println!("[5/9] I2C probe: {}", if i2c_ok { "ACK OK" } else { "NACK (check wiring/pull-ups)" });
+        display::init();
+        display::clear_display();
+        crate::println!("[5/9] Display init OK");
+
+        crate::println!("[6/9] Initializing scheduler...");
         scheduler::init_scheduler();
 
-        crate::println!("[6/7] Initializing subsystems...");
+        crate::println!("[8/9] Initializing subsystems...");
         vfs::init_vfs();
         caps::init_caps();
         event_log::log_boot();
         ipc::init_queues();
         panic_policy::init_crash_log();
 
-        crate::println!("[7/7] Checking for crash loops...");
+        crate::println!("[9/9] Checking for crash loops...");
         if panic_policy::check_crash_loop() {
             crate::panic_policy::recovery_prompt();
+        }
+
+        // Display splash on SSD1306
+        {
+            use crate::display::GRID;
+            GRID.clear();
+            GRID.write_str("Espresso OS v0.1.0\n");
+            GRID.write_str("Phase 1 Complete\n");
+            GRID.write_str("Type 'help' for cmds\n");
+            unsafe { crate::display::render(&GRID); }
         }
 
         crate::println!("======================================");

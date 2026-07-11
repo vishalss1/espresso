@@ -1,3 +1,14 @@
+/// Busy-wait delay in milliseconds.
+pub fn ms(ms: u32) {
+    // 240 MHz → ~240,000 cycles/ms. Each loop ~4 cycles (nop + branch).
+    let cycles = ms * 60_000;
+    let mut i: u32 = 0;
+    while i < cycles {
+        unsafe { core::arch::asm!("nop"); }
+        i += 1;
+    }
+}
+
 pub struct RawDelay;
 
 impl embedded_hal::delay::DelayNs for RawDelay {
