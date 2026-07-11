@@ -28,6 +28,7 @@ pub mod tty;
 pub mod keyboard;
 pub mod display;
 pub mod forth;
+pub mod editor;
 
 extern "C" {
     static mut _bss_start: u32;
@@ -195,6 +196,9 @@ pub extern "C" fn _start() -> ! {
         crate::println!("[6/9] Initializing scheduler...");
         scheduler::init_scheduler();
 
+        crate::println!("[7/9] PS/2 keyboard init...");
+        keyboard::init();
+
         crate::println!("[8/9] Initializing subsystems...");
         vfs::init_vfs();
         caps::init_caps();
@@ -207,13 +211,13 @@ pub extern "C" fn _start() -> ! {
             crate::panic_policy::recovery_prompt();
         }
 
-        // Display splash on SSD1306
+        // Display splash
         {
             use crate::display::GRID;
             GRID.clear();
             GRID.write_str("Espresso OS v0.1.0\n");
-            GRID.write_str("Phase 1 Complete\n");
-            GRID.write_str("Type 'help' for cmds\n");
+            GRID.write_str("Phase 2 in progress\n");
+            GRID.write_str("UART + Keyboard ready\n");
             unsafe { crate::display::render(&GRID); }
         }
 
