@@ -44,14 +44,13 @@ pub struct CharGrid {
 
 pub static mut GRID: CharGrid = CharGrid {
     visible: [[Cell { ch: b' ', inv: false }; GRID_COLS]; GRID_ROWS],
-    scroll_buf: [[Cell { ch: b' ', inv: false }; SCROLL_COLS]; SCROLL_ROWS],
+    scroll_buf: [[Cell { ch: b' ', inv: false }; GRID_COLS]; SCROLL_ROWS],
     scroll_write: 0,
     cursor_col: 0,
     cursor_row: 0,
 };
 
-// Fix: SCROLL_COLS should be GRID_COLS
-const SCROLL_COLS: usize = GRID_COLS;
+static mut DIRTY_PAGES: u8 = 0; // bitmask: bit N = page N needs re-render
 
 impl CharGrid {
     pub const fn new() -> Self {
@@ -72,6 +71,9 @@ impl CharGrid {
 
     /// Push top row into scroll buffer, shift grid up, clear bottom row.
     fn scroll_up(&mut self) {
+        if self.scroll_write >= SCROLL_ROWS {
+            self.scroll_write = 0;
+        }
         let row = self.visible[0];
         self.scroll_buf[self.scroll_write] = row;
         self.scroll_write = (self.scroll_write + 1) % SCROLL_ROWS;
@@ -79,12 +81,16 @@ impl CharGrid {
             self.visible[r] = self.visible[r + 1];
         }
         self.visible[GRID_ROWS - 1] = [Cell::space(); GRID_COLS];
+        unsafe { DIRTY_PAGES = 0xFF; } // all pages shifted
     }
 
     /// Write a single character at the current cursor position, advancing cursor.
     pub fn put_char(&mut self, ch: u8) {
+        if self.cursor_row >= GRID_ROWS { self.cursor_row = 0; }
+        if self.cursor_col >= GRID_COLS { self.cursor_col = 0; }
         match ch {
             b'\n' => {
+                unsafe { DIRTY_PAGES |= 1 << self.cursor_row; }
                 self.cursor_col = 0;
                 self.cursor_row += 1;
                 if self.cursor_row >= GRID_ROWS {
@@ -100,6 +106,7 @@ impl CharGrid {
                 if self.cursor_col > 0 {
                     self.cursor_col -= 1;
                     self.visible[self.cursor_row][self.cursor_col] = Cell::space();
+                    unsafe { DIRTY_PAGES |= 1 << self.cursor_row; }
                 }
             }
             _ => {
@@ -107,6 +114,7 @@ impl CharGrid {
                     self.visible[self.cursor_row][self.cursor_col] =
                         Cell { ch, inv: false };
                     self.cursor_col += 1;
+                    unsafe { DIRTY_PAGES |= 1 << self.cursor_row; }
                 }
                 if self.cursor_col >= GRID_COLS {
                     self.cursor_col = 0;
@@ -508,36 +516,39 @@ pub fn send_page(page: u8, data: &[u8; 128]) {
 /// SH1106 page buffer: 128 bytes (1 page = 8 pixel rows)
 pub static mut PAGE_BUF: [u8; 128] = [0u8; 128];
 
+/// Render one page (row) of the visible grid to the display.
+fn render_page(grid: &CharGrid, page: usize) {
+    unsafe {
+        let mut col_bytes = [0u8; 128];
+
+        for ch_idx in 0..GRID_COLS {
+            let cell = grid.visible[page][ch_idx];
+            let glyph = glyph_ptr(cell.ch);
+            let px_start = ch_idx * 6;
+
+            for col in 0..6usize {
+                let px = px_start + col;
+                if px < 128 {
+                    let byte = core::ptr::read_volatile(glyph.add(col));
+                    col_bytes[px] = if cell.inv { !byte } else { byte };
+                }
+            }
+        }
+
+        for px in (GRID_COLS * 6)..128 {
+            col_bytes[px] = 0;
+        }
+
+        send_page(page as u8, &col_bytes);
+    }
+}
+
 /// Render the visible grid to the display.
 /// Font is column-based: each glyph byte = one vertical column, bit 0 = top pixel.
 /// This maps directly to SH1106 page format — copy glyph bytes straight to column buffer.
 pub fn render(grid: &CharGrid) {
-    unsafe {
-        for page in 0..GRID_ROWS {
-            let mut col_bytes = [0u8; 128];
-
-            for ch_idx in 0..GRID_COLS {
-                let cell = grid.visible[page][ch_idx];
-                let glyph = glyph_ptr(cell.ch);
-                let px_start = ch_idx * 6;
-
-                // Copy 6 glyph columns directly — font format matches SH1106 natively
-                for col in 0..6usize {
-                    let px = px_start + col;
-                    if px < 128 {
-                        let byte = core::ptr::read_volatile(glyph.add(col));
-                        col_bytes[px] = if cell.inv { !byte } else { byte };
-                    }
-                }
-            }
-
-            // Clear right margin
-            for px in (GRID_COLS * 6)..128 {
-                col_bytes[px] = 0;
-            }
-
-            send_page(page as u8, &col_bytes);
-        }
+    for page in 0..GRID_ROWS {
+        render_page(grid, page);
     }
 }
 
@@ -560,4 +571,21 @@ pub fn clear_display() {
 /// Full-screen render: render visible grid.
 pub fn refresh_full(grid: &CharGrid) {
     render(grid);
+}
+
+/// Flush pending display updates. Only renders pages that changed since last flush.
+/// Call from the shell loop to batch renders.
+pub fn flush_display() {
+    unsafe {
+        let dirty = DIRTY_PAGES;
+        if dirty != 0 {
+            DIRTY_PAGES = 0;
+            let grid = &GRID;
+            for page in 0..GRID_ROWS {
+                if dirty & (1 << page) != 0 {
+                    render_page(grid, page);
+                }
+            }
+        }
+    }
 }

@@ -19,7 +19,6 @@ pub mod backend {
                 TtyBackend::Display => {
                     unsafe {
                         crate::display::GRID.put_char(b);
-                        crate::display::render(&crate::display::GRID);
                     }
                 }
             }

@@ -29,6 +29,8 @@ pub mod keyboard;
 pub mod display;
 pub mod forth;
 pub mod editor;
+pub mod pkg;
+pub mod driver;
 
 extern "C" {
     static mut _bss_start: u32;
@@ -205,6 +207,7 @@ pub extern "C" fn _start() -> ! {
         event_log::log_boot();
         ipc::init_queues();
         panic_policy::init_crash_log();
+        driver::init_slots();
 
         crate::println!("[9/9] Checking for crash loops...");
         if panic_policy::check_crash_loop() {

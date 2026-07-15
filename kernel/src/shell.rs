@@ -52,6 +52,8 @@ pub fn start_shell() {
                 }
             }
         }
+
+        crate::display::flush_display();
     }
 }
 
@@ -73,8 +75,14 @@ fn execute_command(cmd_str: &str) {
                 crate::tty::write_str_both("  log                    Show event log\n");
                 crate::tty::write_str_both("  caps <pid>             Show task capabilities\n");
                 crate::tty::write_str_both("  crashlog               Show crash log\n");
+                crate::tty::write_str_both("  install <pkg>          Install package (hash-verified)\n");
+                crate::tty::write_str_both("  update <pkg>           Re-verify and install package\n");
+                crate::tty::write_str_both("  packages               List installed packages\n");
+                crate::tty::write_str_both("  verify <pkg>           Verify package hash\n");
                 crate::tty::write_str_both("  forth                  Enter Forth REPL\n");
                 crate::tty::write_str_both("  edit <file>            Line editor\n");
+                crate::tty::write_str_both("  modload <path>         Load driver module\n");
+                crate::tty::write_str_both("  drivers                List loaded drivers\n");
                 crate::tty::write_str_both("  reboot                 Reboot device\n");
                 crate::tty::write_str_both("  help                   Show this help\n");
             }
@@ -332,6 +340,95 @@ fn execute_command(cmd_str: &str) {
                 }
             }
 
+            // ── Package manager ────────────────────────────────────────
+            "install" if is_mounted() => {
+                if let Some(name) = parts.next() {
+                    if let Err(e) = crate::pkg::pkg_install(name) {
+                        crate::tty::write_str_both("install error: ");
+                        crate::tty::write_str_both(e);
+                        crate::tty::write_str_both("\n");
+                    }
+                } else {
+                    crate::tty::write_str_both("Usage: install <package>\n");
+                }
+            }
+            "update" if is_mounted() => {
+                if let Some(name) = parts.next() {
+                    if let Err(e) = crate::pkg::pkg_update(name) {
+                        crate::tty::write_str_both("update error: ");
+                        crate::tty::write_str_both(e);
+                        crate::tty::write_str_both("\n");
+                    }
+                } else {
+                    crate::tty::write_str_both("Usage: update <package>\n");
+                }
+            }
+            "packages" if is_mounted() => {
+                crate::pkg::pkg_list();
+            }
+            "verify" if is_mounted() => {
+                if let Some(name) = parts.next() {
+                    if let Err(e) = crate::pkg::pkg_verify(name) {
+                        crate::tty::write_str_both("verify error: ");
+                        crate::tty::write_str_both(e);
+                        crate::tty::write_str_both("\n");
+                    }
+                } else {
+                    crate::tty::write_str_both("Usage: verify <package>\n");
+                }
+            }
+
+            // ── Driver hot-load ─────────────────────────────────────
+            "modload" if is_mounted() => {
+                if let Some(path) = parts.next() {
+                    crate::tty::write_str_both("Loading driver: ");
+                    crate::tty::write_str_both(path);
+                    crate::tty::write_str_both("\n");
+                    match crate::loader::load_from_sd(path) {
+                        Ok(prog) => {
+                            crate::println!("Loaded '{}' @ 0x{:08X}, entry=0x{:08X}, stack={}B",
+                                path, prog.base, prog.entry, prog.stack_size);
+                            let name = path.rsplit('/').next().unwrap_or(path);
+                            match crate::driver::load_driver(name, &prog) {
+                                Ok(slot) => {
+                                    crate::tty::write_str_both("Driver registered in slot ");
+                                    crate::tty::write_both(b'0' + slot as u8);
+                                    crate::tty::write_str_both("\n");
+                                    // Call driver_init if entry point is set
+                                    if prog.entry != 0 {
+                                        unsafe {
+                                            let init_fn: extern "C" fn() -> i32 =
+                                                core::mem::transmute(prog.entry);
+                                            let result = init_fn();
+                                            crate::tty::write_str_both("driver_init() returned ");
+                                            let mut buf = [0u8; 12];
+                                            let s = i32_to_str(result, &mut buf);
+                                            crate::tty::write_str_both(s);
+                                            crate::tty::write_str_both("\n");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    crate::tty::write_str_both("modload error: ");
+                                    crate::tty::write_str_both(e);
+                                    crate::tty::write_str_both("\n");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            crate::tty::write_str_both("modload error: ");
+                            crate::tty::write_str_both(&efmt(e));
+                            crate::tty::write_str_both("\n");
+                        }
+                    }
+                } else {
+                    crate::tty::write_str_both("Usage: modload <path>\n");
+                }
+            }
+            "drivers" => {
+                crate::driver::list_drivers();
+            }
+
             // ── Forth ─────────────────────────────────────────────────
             "forth" => {
                 crate::forth::run_interpreter();
@@ -360,6 +457,16 @@ fn execute_command(cmd_str: &str) {
                 crate::tty::write_str_both("'. Type 'help' for help.\n");
             }
         }
+    }
+}
+
+fn efmt(e: crate::loader::LoaderError) -> &'static str {
+    match e {
+        crate::loader::LoaderError::BadMagic => "ERR_BAD_MAGIC",
+        crate::loader::LoaderError::TooLarge => "ERR_TOO_LARGE",
+        crate::loader::LoaderError::InvalidEntry => "ERR_INVALID_ENTRY",
+        crate::loader::LoaderError::InvalidReloc => "ERR_INVALID_RELOC",
+        crate::loader::LoaderError::NoMemory => "ERR_NO_MEMORY",
     }
 }
 
@@ -395,4 +502,34 @@ fn write_hex32_dual(v: u32) {
     for shift in (0..32).step_by(4).rev() {
         crate::tty::write_both(HEX[((v >> shift) & 0xF) as usize]);
     }
+}
+
+fn i32_to_str(val: i32, buf: &mut [u8]) -> &str {
+    let neg = val < 0;
+    let mut v = if neg { (-(val as i64)) as u64 } else { val as u64 };
+    if v == 0 {
+        if neg {
+            buf[0] = b'-';
+            return "-0";
+        } else {
+            buf[0] = b'0';
+            return "0";
+        }
+    }
+    let mut digits = [0u8; 20];
+    let mut d = 0;
+    while v > 0 {
+        digits[d] = b'0' + (v % 10) as u8;
+        v /= 10;
+        d += 1;
+    }
+    let mut pos = 0;
+    if neg { buf[pos] = b'-'; pos += 1; }
+    let mut i = d;
+    while i > 0 {
+        i -= 1;
+        buf[pos] = digits[i];
+        pos += 1;
+    }
+    core::str::from_utf8(&buf[..pos]).unwrap_or("?")
 }
