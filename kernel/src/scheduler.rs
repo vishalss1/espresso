@@ -132,10 +132,6 @@ pub fn scheduler_tick() {
                     TASKS[next].state = TaskState::Running;
                     CURRENT_TASK = next;
 
-                    // DIAGNOSTIC TRACE: dead-task yield path
-                    let fifo = 0x3FF40000 as *mut u32;
-                    core::ptr::write_volatile(fifo, (b'0' + current as u8) as u32);
-
                     let cur = &mut TASKS[current] as *mut TaskControlBlock;
                     let nxt = &mut TASKS[next]    as *mut TaskControlBlock;
                     switch_context(cur, nxt);
@@ -153,10 +149,6 @@ pub fn scheduler_tick() {
             TASKS[next].state = TaskState::Running;
             CURRENT_TASK = next;
 
-            // DIAGNOSTIC TRACE: which task is yielding
-            let fifo = 0x3FF40000 as *mut u32;
-            core::ptr::write_volatile(fifo, (b'0' + current as u8) as u32);
-
             let current_ptr = &mut TASKS[current] as *mut TaskControlBlock;
             let next_ptr    = &mut TASKS[next]    as *mut TaskControlBlock;
             switch_context(current_ptr, next_ptr);
@@ -172,11 +164,6 @@ extern "C" {
 }
 
 fn switch_context(current: *mut TaskControlBlock, next: *mut TaskControlBlock) {
-    // DIAGNOSTIC: switch_context called
-    unsafe {
-        let fifo = 0x3FF40000 as *mut u32;
-        core::ptr::write_volatile(fifo, b'C' as u32);
-    }
     unsafe { switch(current, next); }
 }
 

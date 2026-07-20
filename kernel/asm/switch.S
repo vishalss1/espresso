@@ -115,11 +115,6 @@ _kernel_exc_loop:
     .global _syscall_entry
 _syscall_entry:
 _syscall_handler:
-    # ── DIAGNOSTIC: exception handler entered ──
-    movi    a8, 0x3FF40000
-    movi    a10, 'X'
-    s32i    a10, a8, 0
-
     wsr    a0, excsave1
     addi   a1, a1, -128
 
@@ -139,11 +134,6 @@ _syscall_handler:
     rsr    a6, EXCCAUSE
     movi   a7, 1
     bne    a6, a7, _not_syscall
-
-    # ── DIAGNOSTIC TRACE: confirm syscall fires ──
-    movi   a8, 0x3FF40000
-    movi   a10, 'Y'
-    s32i   a10, a8, 0
 
     s32i   a2, a1, 32
     l32i   a6, a1, 12

@@ -335,17 +335,13 @@ fn sleep_ms_handler(ms: u32) -> i32 {
     let mut start: u32;
     unsafe { core::arch::asm!("rsr {0}, ccount", out(reg) start); }
     let cycles = ms.wrapping_mul(240_000);
-    crate::println!("[SLEEP] ms={}, cycles={}, start={}", ms, cycles, start);
-    let mut count = 0;
     loop {
         let mut now: u32;
         unsafe { core::arch::asm!("rsr {0}, ccount", out(reg) now); }
         let diff = now.wrapping_sub(start);
         if diff >= cycles { 
-            crate::println!("[SLEEP_DONE] diff={}, cycles={}, count={}", diff, cycles, count);
             break; 
         }
-        count += 1;
         crate::scheduler::scheduler_tick();
     }
     ERR_OK
