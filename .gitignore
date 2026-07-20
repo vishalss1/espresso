@@ -36,6 +36,8 @@ espflash.toml
 *.a
 
 ESPRESSO_SPI_MISO_STATUS_REPORT.md
+CONTEXT_FOR_HANDOFF.md
+PACKAGE_FAILURES.md
 spi_hal.c
 spi_master.c
 SPI_MISO_Test_Log.md

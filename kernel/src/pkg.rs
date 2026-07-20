@@ -227,6 +227,12 @@ pub fn parse_manifest(buf: &[u8]) -> Manifest {
 const MANIFEST_BUF_SIZE: usize = 1024;
 const ESPR_BUF_SIZE: usize = 4096;
 
+#[link_section = ".large_bss"]
+static mut MBUF: [u8; MANIFEST_BUF_SIZE] = [0u8; MANIFEST_BUF_SIZE];
+
+#[link_section = ".large_bss"]
+static mut EBUF: [u8; ESPR_BUF_SIZE] = [0u8; ESPR_BUF_SIZE];
+
 fn make_pkg_path(name: &str, suffix: &str, out: &mut [u8]) -> usize {
     let prefix = b"/pkg/";
     let mut pos = 0;
@@ -268,42 +274,40 @@ pub fn pkg_install(name: &str) -> Result<(), &'static str> {
     let manifest_len = make_pkg_path(name, "manifest.txt", &mut manifest_path);
     let manifest_str = core::str::from_utf8(&manifest_path[..manifest_len]).map_err(|_| "ERR_BAD_PATH")?;
 
-    let mut mbuf = [0u8; MANIFEST_BUF_SIZE];
-    let mlen = sd::read_file_to_buf(manifest_str, &mut mbuf).map_err(|e| e)?;
-
-    if mlen == 0 { return Err("ERR_EMPTY_MANIFEST"); }
-
-    let manifest = parse_manifest(&mbuf[..mlen]);
-    if manifest.name_len == 0 { return Err("ERR_NO_NAME_IN_MANIFEST"); }
-
-    let mut espr_path = [0u8; 64];
-    let espr_len = make_pkg_path(name, "main.espr", &mut espr_path);
-    let espr_str = core::str::from_utf8(&espr_path[..espr_len]).map_err(|_| "ERR_BAD_PATH")?;
-
-    let mut ebuf = [0u8; ESPR_BUF_SIZE];
-    let elen = sd::read_file_to_buf(espr_str, &mut ebuf).map_err(|e| e)?;
-
-    if elen == 0 { return Err("ERR_EMPTY_ESPR"); }
-
-    if manifest.sha256_valid {
-        let mut computed = [0u8; 64];
-        sha256_hex(&ebuf[..elen], &mut computed);
-        if computed != manifest.sha256 {
-            crate::tty::write_str_both("  WARN: hash mismatch!\n  expected: ");
-            let expected_str = core::str::from_utf8(&manifest.sha256).unwrap_or("?");
-            crate::tty::write_str_both(expected_str);
-            crate::tty::write_str_both("\n  computed: ");
-            let computed_str = core::str::from_utf8(&computed).unwrap_or("?");
-            crate::tty::write_str_both(computed_str);
-            crate::tty::write_str_both("\n");
-            return Err("ERR_HASH_MISMATCH");
-        }
-        crate::tty::write_str_both("  hash OK\n");
-    } else {
-        crate::tty::write_str_both("  WARN: no sha256 in manifest, skipping verify\n");
-    }
-
     unsafe {
+        let mlen = sd::read_file_to_buf(manifest_str, &mut MBUF).map_err(|e| e)?;
+
+        if mlen == 0 { return Err("ERR_EMPTY_MANIFEST"); }
+
+        let manifest = parse_manifest(&MBUF[..mlen]);
+        if manifest.name_len == 0 { return Err("ERR_NO_NAME_IN_MANIFEST"); }
+
+        let mut espr_path = [0u8; 64];
+        let espr_len = make_pkg_path(name, "main.espr", &mut espr_path);
+        let espr_str = core::str::from_utf8(&espr_path[..espr_len]).map_err(|_| "ERR_BAD_PATH")?;
+
+        let elen = sd::read_file_to_buf(espr_str, &mut EBUF).map_err(|e| e)?;
+
+        if elen == 0 { return Err("ERR_EMPTY_ESPR"); }
+
+        if manifest.sha256_valid {
+            let mut computed = [0u8; 64];
+            sha256_hex(&EBUF[..elen], &mut computed);
+            if computed != manifest.sha256 {
+                crate::tty::write_str_both("  WARN: hash mismatch!\n  expected: ");
+                let expected_str = core::str::from_utf8(&manifest.sha256).unwrap_or("?");
+                crate::tty::write_str_both(expected_str);
+                crate::tty::write_str_both("\n  computed: ");
+                let computed_str = core::str::from_utf8(&computed).unwrap_or("?");
+                crate::tty::write_str_both(computed_str);
+                crate::tty::write_str_both("\n");
+                return Err("ERR_HASH_MISMATCH");
+            }
+            crate::tty::write_str_both("  hash OK\n");
+        } else {
+            crate::tty::write_str_both("  WARN: no sha256 in manifest, skipping verify\n");
+        }
+
         let mut found = false;
         for i in 0..PACKAGE_COUNT {
             if PACKAGES[i].name_len as usize == name.len()
@@ -345,32 +349,32 @@ pub fn pkg_verify(name: &str) -> Result<(), &'static str> {
     let manifest_len = make_pkg_path(name, "manifest.txt", &mut manifest_path);
     let manifest_str = core::str::from_utf8(&manifest_path[..manifest_len]).map_err(|_| "ERR_BAD_PATH")?;
 
-    let mut mbuf = [0u8; MANIFEST_BUF_SIZE];
-    let mlen = sd::read_file_to_buf(manifest_str, &mut mbuf).map_err(|e| e)?;
+    unsafe {
+        let mlen = sd::read_file_to_buf(manifest_str, &mut MBUF).map_err(|e| e)?;
 
-    if mlen == 0 { return Err("ERR_EMPTY_MANIFEST"); }
-    let manifest = parse_manifest(&mbuf[..mlen]);
+        if mlen == 0 { return Err("ERR_EMPTY_MANIFEST"); }
+        let manifest = parse_manifest(&MBUF[..mlen]);
 
-    let mut espr_path = [0u8; 64];
-    let espr_len = make_pkg_path(name, "main.espr", &mut espr_path);
-    let espr_str = core::str::from_utf8(&espr_path[..espr_len]).map_err(|_| "ERR_BAD_PATH")?;
+        let mut espr_path = [0u8; 64];
+        let espr_len = make_pkg_path(name, "main.espr", &mut espr_path);
+        let espr_str = core::str::from_utf8(&espr_path[..espr_len]).map_err(|_| "ERR_BAD_PATH")?;
 
-    let mut ebuf = [0u8; ESPR_BUF_SIZE];
-    let elen = sd::read_file_to_buf(espr_str, &mut ebuf).map_err(|e| e)?;
+        let elen = sd::read_file_to_buf(espr_str, &mut EBUF).map_err(|e| e)?;
 
-    if !manifest.sha256_valid {
-        return Err("ERR_NO_SHA256");
-    }
+        if !manifest.sha256_valid {
+            return Err("ERR_NO_SHA256");
+        }
 
-    let mut computed = [0u8; 64];
-    sha256_hex(&ebuf[..elen], &mut computed);
+        let mut computed = [0u8; 64];
+        sha256_hex(&EBUF[..elen], &mut computed);
 
-    if computed == manifest.sha256 {
-        crate::tty::write_str_both("  verify OK\n");
-        Ok(())
-    } else {
-        crate::tty::write_str_both("  ERR: hash mismatch\n");
-        Err("ERR_HASH_MISMATCH")
+        if computed == manifest.sha256 {
+            crate::tty::write_str_both("  verify OK\n");
+            Ok(())
+        } else {
+            crate::tty::write_str_both("  ERR: hash mismatch\n");
+            Err("ERR_HASH_MISMATCH")
+        }
     }
 }
 

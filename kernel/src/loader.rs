@@ -1,6 +1,51 @@
 //! Loader module - loads and executes .espr relocatable binaries
+//!
+//! ESP32 Memory Bus Architecture:
+//!   The ESP32 has separate instruction and data buses. The internal SRAM is
+//!   "dual-mapped" — accessible via both buses at different addresses:
+//!     Data bus (DRAM):  0x3FFB0000 – 0x3FFEFFFF  (load/store)
+//!     Instr bus (IRAM): 0x40080000 – 0x400BFFFF  (CPU instruction fetch)
+//!
+//!   Code written to DRAM addresses (0x3FFBxxxx) cannot be directly executed.
+//!   The entry point must be translated to its IRAM alias (addr + 0xD0000)
+//!   before being used as a task entry point.
 
 use crate::mem::pool;
+
+/// ESP32 dual-mapped SRAM (DIRAM) data bus base address.
+/// Physical internal SRAM is accessible via the data bus starting here.
+const DIRAM_DBUS_BASE: usize = 0x3FFB0000;
+/// ESP32 dual-mapped SRAM (DIRAM) instruction bus base address.
+/// The same physical SRAM is accessible via the instruction bus starting here.
+/// Offset: IRAM base (0x40080000) - DRAM base (0x3FFB0000) = 0xD0000
+const DIRAM_IBUS_BASE: usize = 0x40080000;
+/// Offset to translate a DRAM address to its IRAM instruction-bus alias.
+/// This is the SOC_IRAM_DRAM_OFFSET constant for the ESP32.
+const DIRAM_OFFSET: usize = 0x000D0000; // = DIRAM_IBUS_BASE - DIRAM_DBUS_BASE
+/// Size of the dual-mapped internal SRAM region (256 KB).
+/// DRAM view: 0x3FFB0000 – 0x3FFEFFFF
+/// IRAM view: 0x40080000 – 0x400BFFFF
+const DIRAM_SIZE: usize = 0x40000; // 256 KB
+
+/// Translate a DRAM (data bus) address within the ESP32 dual-mapped SRAM to its
+/// instruction-bus (IRAM) equivalent so the CPU can execute code from it.
+///
+/// Returns the same address unchanged if it is already an IRAM address or
+/// outside the dual-mapped DIRAM region.
+///
+/// # ESP32 Memory Architecture
+/// The internal SRAM is dual-mapped:
+///   Data bus (DRAM):  0x3FFB0000 – 0x3FFCFFFF  (use for load/store)
+///   Instr bus (IRAM): 0x40080000 – 0x4009FFFF  (CPU fetches instructions here)
+/// Writing code bytes to a DRAM address and then jumping to (DRAM_addr + 0xD0000)
+/// is how bare-metal ESP32 software executes dynamically-loaded code.
+pub fn dram_to_iram(addr: usize) -> usize {
+    if addr >= DIRAM_DBUS_BASE && addr < DIRAM_DBUS_BASE + DIRAM_SIZE {
+        addr + DIRAM_OFFSET
+    } else {
+        addr
+    }
+}
 
 pub const MAGIC: u32 = 0x45535052; // "ESPR"
 pub const HEADER_SIZE: usize = 0x20;
@@ -24,6 +69,7 @@ pub enum LoaderError {
     InvalidEntry,
     InvalidReloc,
     NoMemory,
+    ReadError(&'static str),
 }
 
 impl core::fmt::Display for LoaderError {
@@ -34,6 +80,11 @@ impl core::fmt::Display for LoaderError {
             LoaderError::InvalidEntry => write!(f, "ERR_INVALID_ENTRY"),
             LoaderError::InvalidReloc => write!(f, "ERR_INVALID_RELOC"),
             LoaderError::NoMemory => write!(f, "ERR_NO_MEMORY"),
+            LoaderError::ReadError(s) => {
+                write!(f, "ERR_READ_FAILED(")?;
+                write!(f, "{}", s)?;
+                write!(f, ")")
+            }
         }
     }
 }
@@ -62,88 +113,153 @@ fn read_header(data: &[u8]) -> Result<EsprHeader, LoaderError> {
 }
 
 pub fn load(data: &[u8]) -> Result<LoadedProgram, LoaderError> {
+    crate::println!("[LOAD] Beginning binary parsing. Size = {} bytes", data.len());
     if data.len() < HEADER_SIZE { return Err(LoaderError::BadMagic); }
     let header = read_header(data)?;
+    crate::println!("[LOAD] Parsed EsprHeader: magic=0x{:08X}, code_size={}, data_size={}, bss_size={}, entry_offset={}, reloc_offset={}, reloc_count={}, stack_size={}",
+        header.magic, header.code_size, header.data_size, header.bss_size, header.entry_offset, header.reloc_offset, header.reloc_count, header.stack_size);
     if header.magic != MAGIC { return Err(LoaderError::BadMagic); }
 
     let code_size = header.code_size as usize;
     let data_size = header.data_size as usize;
     let bss_size = header.bss_size as usize;
     let reloc_count = header.reloc_count as usize;
-    let total = code_size + data_size;
 
-    let pages_needed = (total + pool::PAGE_SIZE - 1) / pool::PAGE_SIZE;
-    let base = pool::alloc_pages(pages_needed).ok_or(LoaderError::NoMemory)?;
+    // Ensure the payload size is 4-byte aligned for word-wise loading
+    let total = (code_size + data_size + 3) & !3;
+
+    // Allocate memory pages.
+    let total_with_bss = total + bss_size;
+    let pages_needed = (total_with_bss + pool::PAGE_SIZE - 1) / pool::PAGE_SIZE;
+    crate::println!("[LOAD] code_size={}, data_size={}, bss_size={}, pages_needed={}",
+        code_size, data_size, bss_size, pages_needed);
+    let base_dram = pool::alloc_pages(pages_needed).ok_or(LoaderError::NoMemory)?;
+
+    // Translate the DRAM pool address to its IRAM instruction-bus alias.
+    // This is the address the CPU uses to FETCH instructions.
+    // We write code directly to this IRAM address to avoid DRAM→IRAM bus ambiguity.
+    let iram_base = dram_to_iram(base_dram);
+    crate::println!("[LOAD] base_dram=0x{:08X} iram_base=0x{:08X}", base_dram, iram_base);
 
     unsafe {
-        let dst = core::slice::from_raw_parts_mut(base as *mut u8, total);
-        let src_end = HEADER_SIZE + total;
-        if src_end > data.len() { pool::free_page(base); return Err(LoaderError::TooLarge); }
-        dst.copy_from_slice(&data[HEADER_SIZE..src_end]);
+        let word_count = total / 4;
+        let src_payload = &data[HEADER_SIZE..HEADER_SIZE + code_size + data_size];
 
-        let bss_start = base + code_size + data_size;
-        for i in 0..bss_size {
-            core::ptr::write_volatile((bss_start + i) as *mut u8, 0);
+        // 1. Write code/data directly to IRAM addresses (instruction bus alias).
+        //
+        // KEY INSIGHT: On ESP32, the DIRAM region allows both bus paths to the same
+        // physical SRAM. However, writing to the DRAM alias and reading back via IRAM
+        // showed a mismatch — suggesting the store buffer/pipeline does not guarantee
+        // IRAM alias visibility after a DRAM write until a full memw+dsync+isync fence.
+        //
+        // Writing directly to IRAM addresses avoids the issue entirely — the CPU
+        // writes to SRAM via the instruction bus address space, and instruction fetch
+        // from the same IRAM address sees fresh data immediately.
+        //
+        // All stores must be 32-bit word-aligned (IRAM requirement).
+        for i in 0..word_count {
+            let src_off = i * 4;
+            let mut word_bytes = [0u8; 4];
+            for b in 0..4 {
+                if src_off + b < src_payload.len() {
+                    word_bytes[b] = src_payload[src_off + b];
+                }
+            }
+            let src_word = u32::from_le_bytes(word_bytes);
+            let dest_iram = iram_base + i * 4;
+            core::ptr::write_volatile(dest_iram as *mut u32, src_word);
         }
 
-        if reloc_count > 0 {
-            let reloc_off = header.reloc_offset as usize;
-            if reloc_off + reloc_count * 4 > data.len() { pool::free_page(base); return Err(LoaderError::InvalidReloc); }
-            for i in 0..reloc_count {
-                let offset = u32::from_le_bytes([
-                    data[reloc_off + i * 4], data[reloc_off + i * 4 + 1],
-                    data[reloc_off + i * 4 + 2], data[reloc_off + i * 4 + 3],
-                ]) as usize;
-                if offset + 4 > total { pool::free_page(base); return Err(LoaderError::InvalidReloc); }
-                let patch_addr = (base + offset) as *mut u32;
-                let old_val = core::ptr::read_volatile(patch_addr);
-                core::ptr::write_volatile(patch_addr, old_val.wrapping_add(base as u32));
+        // 2. Zero BSS in IRAM (beyond the code/data region).
+        let allocated_bytes = pages_needed * pool::PAGE_SIZE;
+        for addr in (iram_base..iram_base + allocated_bytes).step_by(4) {
+            if addr >= iram_base + total {
+                core::ptr::write_volatile(addr as *mut u32, 0);
             }
         }
 
+        // 3. Patch relocations.
+        // Relocatable addresses in the binary are relative offsets that need to be
+        // fixed up to absolute IRAM addresses once we know iram_base.
+        if reloc_count > 0 {
+            let reloc_off = header.reloc_offset as usize;
+            if reloc_off + reloc_count * 4 > data.len() {
+                pool::free_page(base_dram);
+                return Err(LoaderError::InvalidReloc);
+            }
+            for i in 0..reloc_count {
+                let offset = u32::from_le_bytes([
+                    data[reloc_off + i * 4],     data[reloc_off + i * 4 + 1],
+                    data[reloc_off + i * 4 + 2], data[reloc_off + i * 4 + 3],
+                ]) as usize;
+
+                if offset + 4 > total {
+                    pool::free_page(base_dram);
+                    return Err(LoaderError::InvalidReloc);
+                }
+
+                // Patch the word at IRAM[offset] by adding iram_base.
+                let patch_iram = iram_base + offset;
+                let old_val = core::ptr::read_volatile(patch_iram as *const u32);
+                let new_val = iram_base as u32 + old_val;
+                core::ptr::write_volatile(patch_iram as *mut u32, new_val);
+            }
+        }
+
+        // Calculate the entry point in IRAM
+        let iram_entry = iram_base + header.entry_offset as usize;
+
+        // Verify: read back first word from IRAM to confirm the write succeeded.
+        let first_word_iram = core::ptr::read_volatile(iram_base as *const u32);
+        let expected_word = {
+            let mut b = [0u8; 4];
+            for i in 0..4 {
+                if HEADER_SIZE + i < data.len() { b[i] = data[HEADER_SIZE + i]; }
+            }
+            u32::from_le_bytes(b)
+        };
+        crate::println!("[LOAD] IRAM[0]=0x{:08X} expected=0x{:08X} entry=0x{:08X}",
+            first_word_iram, expected_word, iram_entry);
+        if first_word_iram != expected_word {
+            crate::println!("[LOAD] *** IRAM write FAILED — bytes not visible at IRAM address ***");
+        }
+
+        // Flush instruction pipeline after writing new code to IRAM.
+        // memw: drain data-bus store buffer
+        // dsync: synchronize data side-effects
+        // isync: flush CPU instruction prefetch buffer
+        core::arch::asm!("memw", "dsync", "isync");
+
         Ok(LoadedProgram {
-            base, code_size, data_size, bss_size,
-            entry: base + header.entry_offset as usize,
+            base: base_dram,  // DRAM address — used by unload() to free pages
+            code_size,
+            data_size,
+            bss_size,
+            entry: iram_entry,
             stack_size: header.stack_size as usize,
         })
     }
 }
 
+
 pub fn unload(prog: &LoadedProgram) {
-    let pages_needed = (prog.code_size + prog.data_size + 4095) / 4096;
+    let total_with_bss = ((prog.code_size + prog.data_size + 3) & !3) + prog.bss_size;
+    let pages_needed = (total_with_bss + pool::PAGE_SIZE - 1) / pool::PAGE_SIZE;
     for i in 0..pages_needed {
         pool::free_page(prog.base + i * pool::PAGE_SIZE);
     }
 }
 
+#[link_section = ".large_bss"]
+static mut FILE_DATA: [u8; 4096] = [0u8; 4096];
+
 pub fn load_from_sd(path: &str) -> Result<LoadedProgram, LoaderError> {
     use crate::drivers::sd;
-    use embedded_sdmmc::{VolumeIdx, Mode};
-
-    let mut mgr_ref = unsafe {
-        sd::VOLUME_MGR.as_mut().ok_or(LoaderError::NoMemory)?
-    };
-
-    let mut volume = mgr_ref.open_volume(VolumeIdx(0)).map_err(|_| LoaderError::NoMemory)?;
-    let mut root = volume.open_root_dir().map_err(|_| LoaderError::NoMemory)?;
-    let mut file = root.open_file_in_dir(path, Mode::ReadOnly).map_err(|_| LoaderError::NoMemory)?;
-
-    let mut file_data = [0u8; 4096];
-    let mut offset = 0usize;
-
-    loop {
-        let mut chunk = [0u8; 512];
-        let n = file.read(&mut chunk).map_err(|_| LoaderError::NoMemory)?;
-        if n == 0 { break; }
-        let copy_end = core::cmp::min(offset + n, file_data.len());
-        file_data[offset..copy_end].copy_from_slice(&chunk[..copy_end - offset]);
-        offset = copy_end;
-        if copy_end >= file_data.len() { break; }
+    crate::println!("[LOAD] Loading binary from SD: '{}'", path);
+    unsafe {
+        crate::println!("[LOAD] Reading SD file into static FILE_DATA buffer (max 4096 bytes)");
+        let offset = sd::read_file_to_buf(path, &mut FILE_DATA).map_err(|e| LoaderError::ReadError(e))?;
+        crate::println!("[LOAD] Read successful: {} bytes read into FILE_DATA", offset);
+        load(&FILE_DATA[..offset])
     }
-
-    let _ = file.close();
-    let _ = root.close();
-    let _ = volume.close();
-
-    load(&file_data[..offset])
 }

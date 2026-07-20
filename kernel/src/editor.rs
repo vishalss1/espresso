@@ -34,7 +34,6 @@ fn fill_line() -> bool {
     let mut buf = [0u8; 128];
     let mut len = 0;
     loop {
-        crate::keyboard::poll();
         if let Some(b) = crate::tty::poll_read() {
             if b == b'\r' || b == b'\n' {
                 write_both(b'\r');
@@ -239,7 +238,6 @@ pub fn run_editor(path: &str) {
         // Read a line
         let mut cmd_len = 0;
         loop {
-            crate::keyboard::poll();
             if let Some(b) = crate::tty::poll_read() {
                 if b == b'\r' || b == b'\n' {
                     write_both(b'\r');

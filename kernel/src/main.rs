@@ -25,7 +25,6 @@ pub mod panic_policy;
 pub mod gpio;
 pub mod ipc;
 pub mod tty;
-pub mod keyboard;
 pub mod display;
 pub mod forth;
 pub mod editor;
@@ -38,6 +37,8 @@ extern "C" {
     static mut _data_start: u32;
     static mut _data_end: u32;
     static _data_load: u32;
+    static espresso_vecbase: u32;
+    fn setup_vecbase();
 }
 
 #[panic_handler]
@@ -160,8 +161,19 @@ unsafe fn enable_bod() {
     core::ptr::write_volatile(RTC_CNTL_BROWN_OUT, 1 << 31);
 }
 
+#[unsafe(naked)]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    unsafe {
+        core::arch::naked_asm!(
+            "movi a1, 0x3FFB7C00",
+            "j _start_rust"
+        );
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn _start_rust() -> ! {
     unsafe {
         init_memory();
         crate::mem::pool::init_bitmap();
@@ -173,35 +185,38 @@ pub extern "C" fn _start() -> ! {
         crate::println!("Espresso OS — Boot Sequence");
         crate::println!("======================================");
 
-        crate::println!("[1/9] UART init OK");
+        crate::println!("[1/8] UART init OK");
 
-        crate::println!("[2/9] Enabling brownout detector...");
+        crate::println!("[2/8] Enabling brownout detector...");
         enable_bod();
 
-        crate::println!("[3/9] SPI init (400 kHz, SW CS GPIO5)...");
+        crate::println!("[3/8] SPI init (400 kHz, SW CS GPIO5)...");
         drivers::spi::spi_init();
 
-        crate::println!("[4/9] SD card init...");
+        crate::println!("[4/8] SD card init...");
         match drivers::sd::init_fs() {
-            Ok(()) => crate::println!("[4/9] SD card mounted OK"),
-            Err(e) => crate::println!("[4/9] SD card FAILED: {}", e),
+            Ok(()) => crate::println!("[4/8] SD card mounted OK"),
+            Err(e) => crate::println!("[4/8] SD card FAILED: {}", e),
         }
 
-        crate::println!("[5/9] I2C init + SH1106 display...");
+        crate::println!("[5/8] I2C init + SH1106 display...");
         drivers::i2c::init();
         let i2c_ok = drivers::i2c::write(display::I2C_ADDR, &[0x00, 0xAF]); // display ON cmd
-        crate::println!("[5/9] I2C probe: {}", if i2c_ok { "ACK OK" } else { "NACK (check wiring/pull-ups)" });
+        crate::println!("[5/8] I2C probe: {}", if i2c_ok { "ACK OK" } else { "NACK (check wiring/pull-ups)" });
         display::init();
         display::clear_display();
-        crate::println!("[5/9] Display init OK");
+        crate::println!("[5/8] Display init OK");
 
-        crate::println!("[6/9] Initializing scheduler...");
+        crate::println!("[6/8] Initializing scheduler...");
         scheduler::init_scheduler();
 
-        crate::println!("[7/9] PS/2 keyboard init...");
-        keyboard::init();
+        crate::println!("[6b] Installing SYSCALL exception vector...");
+        setup_vecbase();
+        let mut vb: u32 = 0;
+        core::arch::asm!("rsr {0}, vecbase", out(reg) vb);
+        crate::println!("[6b] VECBASE = 0x{:08X} (expected 0x{:08X})", vb, &raw const espresso_vecbase as usize);
 
-        crate::println!("[8/9] Initializing subsystems...");
+        crate::println!("[7/8] Initializing subsystems...");
         vfs::init_vfs();
         caps::init_caps();
         event_log::log_boot();
@@ -209,7 +224,7 @@ pub extern "C" fn _start() -> ! {
         panic_policy::init_crash_log();
         driver::init_slots();
 
-        crate::println!("[9/9] Checking for crash loops...");
+        crate::println!("[8/8] Checking for crash loops...");
         if panic_policy::check_crash_loop() {
             crate::panic_policy::recovery_prompt();
         }
@@ -220,7 +235,7 @@ pub extern "C" fn _start() -> ! {
             GRID.clear();
             GRID.write_str("Espresso OS v0.1.0\n");
             GRID.write_str("Phase 2 in progress\n");
-            GRID.write_str("UART + Keyboard ready\n");
+            GRID.write_str("UART ready\n");
             unsafe { crate::display::render(&GRID); }
         }
 
@@ -236,25 +251,27 @@ pub extern "C" fn _start() -> ! {
 }
 
 pub fn run_program(path: &str) {
+    crate::println!("[RUN] Starting run_program for '{}'", path);
     match loader::load_from_sd(path) {
         Ok(prog) => {
-            crate::println!("Loaded '{}' @ 0x{:08X}, entry=0x{:08X}, stack={}B",
-                path, prog.base, prog.entry, prog.stack_size);
+            crate::println!("[RUN] Program loaded: base=0x{:08X}, entry=0x{:08X}, stack={}B",
+                prog.base, prog.entry, prog.stack_size);
             crate::event_log::log_task_spawn(0xFF);
 
             let entry = prog.entry;
             let stack = if prog.stack_size > 0 { prog.stack_size } else { 4096 };
+            crate::println!("[RUN] Spawning task: entry=0x{:08X}, stack_size={}", entry, stack);
             match scheduler::spawn_task(entry, stack, caps::CAP_ALL) {
                 Ok(pid) => {
-                    crate::println!("Spawned as PID {}", pid);
+                    crate::println!("[RUN] Success: task spawned as PID {}", pid);
                 }
                 Err(e) => {
-                    crate::println!("Failed to spawn: {}", e);
+                    crate::println!("[RUN] Error spawning task: {}", e);
                 }
             }
         }
         Err(e) => {
-            crate::println!("run error: {}", e);
+            crate::println!("[RUN] Loader failed: {}", e);
         }
     }
 }

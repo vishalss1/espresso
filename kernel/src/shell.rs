@@ -1,6 +1,6 @@
 //! Interactive TTY Shell for Espresso OS.
 //! Supports line editing, input echo, backspace, and command dispatch.
-//! Input from both PS/2 keyboard and UART. Output to both display and UART.
+//! Input from UART. Output to both display and UART.
 
 use crate::drivers::sd::{list_dir, cat_file, is_mounted, touch_file, write_file};
 
@@ -10,6 +10,7 @@ pub fn start_shell() {
     let mut input_buf = [0u8; 128];
     let mut input_len = 0;
     let mut wdt_counter = 0u32;
+    let mut yield_counter = 0u32;
 
     crate::tty::write_str_both("\n");
     crate::tty::write_str_both("Welcome to Espresso OS Shell!\n");
@@ -23,10 +24,16 @@ pub fn start_shell() {
             unsafe { crate::wdt_feed(); }
         }
 
-        // Poll PS/2 keyboard and UART
-        crate::keyboard::poll();
+        // Yield to other tasks periodically (round-robin)
+        yield_counter += 1;
+        if yield_counter >= 200 {
+            yield_counter = 0;
+            crate::scheduler::scheduler_tick();
+        }
 
-        if let Some(b) = crate::tty::poll_read() {
+        let opt = crate::tty::poll_read();
+
+        if let Some(b) = opt {
             if b == b'\r' || b == b'\n' {
                 crate::tty::write_str_both("\r\n");
                 if input_len > 0 {
@@ -88,16 +95,22 @@ fn execute_command(cmd_str: &str) {
             }
 
             // ── File commands ───────────────────────────────────────────
-            "ls" if is_mounted() => {
-                let path = parts.next().unwrap_or("/");
-                if let Err(e) = list_dir(path) {
-                    crate::tty::write_str_both("ls error: ");
-                    crate::tty::write_str_both(e);
-                    crate::tty::write_str_both("\n");
+            "ls" => {
+                if !is_mounted() {
+                    crate::tty::write_str_both("ls error: no SD card\n");
+                } else {
+                    let path = parts.next().unwrap_or("/");
+                    if let Err(e) = list_dir(path) {
+                        crate::tty::write_str_both("ls error: ");
+                        crate::tty::write_str_both(e);
+                        crate::tty::write_str_both("\n");
+                    }
                 }
             }
-            "cat" if is_mounted() => {
-                if let Some(filename) = parts.next() {
+            "cat" => {
+                if !is_mounted() {
+                    crate::tty::write_str_both("cat error: no SD card\n");
+                } else if let Some(filename) = parts.next() {
                     if let Err(e) = cat_file(filename) {
                         crate::tty::write_str_both("cat error: ");
                         crate::tty::write_str_both(e);
@@ -107,8 +120,10 @@ fn execute_command(cmd_str: &str) {
                     crate::tty::write_str_both("Usage: cat <filename>\n");
                 }
             }
-            "touch" if is_mounted() => {
-                if let Some(filename) = parts.next() {
+            "touch" => {
+                if !is_mounted() {
+                    crate::tty::write_str_both("touch error: no SD card\n");
+                } else if let Some(filename) = parts.next() {
                     if let Err(e) = touch_file(filename) {
                         crate::tty::write_str_both("touch error: ");
                         crate::tty::write_str_both(e);
@@ -118,31 +133,35 @@ fn execute_command(cmd_str: &str) {
                     crate::tty::write_str_both("Usage: touch <filename>\n");
                 }
             }
-            "echo" if is_mounted() => {
-                let rest = cmd_str[4..].trim_start();
-                if rest.starts_with('"') {
-                    if let Some(end_quote) = rest[1..].find('"') {
-                        let text = &rest[1..1 + end_quote];
-                        let after_quote = rest[2 + end_quote..].trim_start();
-                        if after_quote.starts_with('>') {
-                            let path = after_quote[1..].trim_start();
-                            if !path.is_empty() {
-                                if let Err(e) = write_file(path, text.as_bytes()) {
-                                    crate::tty::write_str_both("echo error: ");
-                                    crate::tty::write_str_both(e);
-                                    crate::tty::write_str_both("\n");
+            "echo" => {
+                if !is_mounted() {
+                    crate::tty::write_str_both("echo error: no SD card\n");
+                } else {
+                    let rest = cmd_str[4..].trim_start();
+                    if rest.starts_with('"') {
+                        if let Some(end_quote) = rest[1..].find('"') {
+                            let text = &rest[1..1 + end_quote];
+                            let after_quote = rest[2 + end_quote..].trim_start();
+                            if after_quote.starts_with('>') {
+                                let path = after_quote[1..].trim_start();
+                                if !path.is_empty() {
+                                    if let Err(e) = write_file(path, text.as_bytes()) {
+                                        crate::tty::write_str_both("echo error: ");
+                                        crate::tty::write_str_both(e);
+                                        crate::tty::write_str_both("\n");
+                                    }
+                                } else {
+                                    crate::tty::write_str_both("Usage: echo \"<text>\" > <path>\n");
                                 }
                             } else {
                                 crate::tty::write_str_both("Usage: echo \"<text>\" > <path>\n");
                             }
                         } else {
-                            crate::tty::write_str_both("Usage: echo \"<text>\" > <path>\n");
+                            crate::tty::write_str_both("echo: unclosed quote\n");
                         }
                     } else {
-                        crate::tty::write_str_both("echo: unclosed quote\n");
+                        crate::tty::write_str_both("Usage: echo \"<text>\" > <path>\n");
                     }
-                } else {
-                    crate::tty::write_str_both("Usage: echo \"<text>\" > <path>\n");
                 }
             }
 
@@ -341,8 +360,10 @@ fn execute_command(cmd_str: &str) {
             }
 
             // ── Package manager ────────────────────────────────────────
-            "install" if is_mounted() => {
-                if let Some(name) = parts.next() {
+            "install" => {
+                if !is_mounted() {
+                    crate::tty::write_str_both("install error: no SD card\n");
+                } else if let Some(name) = parts.next() {
                     if let Err(e) = crate::pkg::pkg_install(name) {
                         crate::tty::write_str_both("install error: ");
                         crate::tty::write_str_both(e);
@@ -352,8 +373,10 @@ fn execute_command(cmd_str: &str) {
                     crate::tty::write_str_both("Usage: install <package>\n");
                 }
             }
-            "update" if is_mounted() => {
-                if let Some(name) = parts.next() {
+            "update" => {
+                if !is_mounted() {
+                    crate::tty::write_str_both("update error: no SD card\n");
+                } else if let Some(name) = parts.next() {
                     if let Err(e) = crate::pkg::pkg_update(name) {
                         crate::tty::write_str_both("update error: ");
                         crate::tty::write_str_both(e);
@@ -363,11 +386,17 @@ fn execute_command(cmd_str: &str) {
                     crate::tty::write_str_both("Usage: update <package>\n");
                 }
             }
-            "packages" if is_mounted() => {
-                crate::pkg::pkg_list();
+            "packages" => {
+                if !is_mounted() {
+                    crate::tty::write_str_both("packages error: no SD card\n");
+                } else {
+                    crate::pkg::pkg_list();
+                }
             }
-            "verify" if is_mounted() => {
-                if let Some(name) = parts.next() {
+            "verify" => {
+                if !is_mounted() {
+                    crate::tty::write_str_both("verify error: no SD card\n");
+                } else if let Some(name) = parts.next() {
                     if let Err(e) = crate::pkg::pkg_verify(name) {
                         crate::tty::write_str_both("verify error: ");
                         crate::tty::write_str_both(e);
@@ -379,8 +408,10 @@ fn execute_command(cmd_str: &str) {
             }
 
             // ── Driver hot-load ─────────────────────────────────────
-            "modload" if is_mounted() => {
-                if let Some(path) = parts.next() {
+            "modload" => {
+                if !is_mounted() {
+                    crate::tty::write_str_both("modload error: no SD card\n");
+                } else if let Some(path) = parts.next() {
                     crate::tty::write_str_both("Loading driver: ");
                     crate::tty::write_str_both(path);
                     crate::tty::write_str_both("\n");
@@ -467,6 +498,7 @@ fn efmt(e: crate::loader::LoaderError) -> &'static str {
         crate::loader::LoaderError::InvalidEntry => "ERR_INVALID_ENTRY",
         crate::loader::LoaderError::InvalidReloc => "ERR_INVALID_RELOC",
         crate::loader::LoaderError::NoMemory => "ERR_NO_MEMORY",
+        crate::loader::LoaderError::ReadError(_) => "ERR_READ_FAILED",
     }
 }
 

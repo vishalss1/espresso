@@ -2,9 +2,9 @@
 //!
 //! Logs syscalls, errors, ERR_PERM denials, WDT feed gaps.
 
-pub const EVENT_RING_SIZE: usize = 4096;
-pub const EVENT_SIZE: usize = 32;
-pub const MAX_EVENTS: usize = EVENT_RING_SIZE / EVENT_SIZE;
+pub const EVENT_SIZE: usize = 34; // 4 (timestamp) + 1 (type) + 1 (pid) + 28 (data)
+pub const MAX_EVENTS: usize = 120;
+pub const EVENT_RING_SIZE: usize = MAX_EVENTS * EVENT_SIZE; // 4080
 
 pub const EVT_SYSCALL: u8 = 0x01;
 pub const EVT_ERROR: u8 = 0x02;

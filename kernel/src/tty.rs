@@ -1,6 +1,6 @@
 //! TTY module — unified terminal abstraction.
 //!
-//! Input: polls both PS/2 keyboard and UART RX.
+//! Input: polls UART RX.
 //! Output: writes to UART + display (dual TTY).
 
 pub mod backend {
@@ -41,15 +41,10 @@ pub fn write_str_both(s: &str) {
     }
 }
 
-/// Poll PS/2 keyboard + UART for one byte of input.
+/// Poll UART for one byte of input.
 /// Returns the first available byte, or None if nothing pending.
 /// Also services WDT feed.
 pub fn poll_read() -> Option<u8> {
-    // Poll keyboard first (faster response)
-    if let Some(b) = crate::keyboard::read_byte() {
-        return Some(b);
-    }
-    // Then UART
     let uart = crate::drivers::uart::RawUart;
     uart.read_byte()
 }

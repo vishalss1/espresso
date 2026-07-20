@@ -509,6 +509,7 @@ fn lfn_extract(e: &[u8], lfn_buf: &mut [u8], lfn_pos: usize) -> usize {
     for &o in OFFS.iter() {
         let lo = e[o];
         let hi = e[o + 1];
+        if lo == 0x00 && hi == 0x00 { break; }
         if lo == 0xFF && hi == 0xFF { break; }
         if lfn_pos + count < lfn_buf.len() {
             lfn_buf[lfn_pos + count] = if hi != 0 { b'?' } else { lo };
@@ -536,12 +537,19 @@ fn make_sfn_upper(name: &str) -> [u8; 11] {
     let dot = b.iter().rposition(|&c| c == b'.');
     match dot {
         Some(dp) => {
-            let base_len = dp.min(6);
-            for i in 0..base_len { buf[i] = b[i].to_ascii_uppercase(); }
-            buf[6] = b'~';
-            buf[7] = b'1';
-            let ext_len = (b.len() - dp - 1).min(3);
-            for i in 0..ext_len { buf[8 + i] = b[dp + 1 + i].to_ascii_uppercase(); }
+            let base_len = dp;
+            let ext_len = b.len() - dp - 1;
+            if base_len <= 8 && ext_len <= 3 {
+                for i in 0..base_len { buf[i] = b[i].to_ascii_uppercase(); }
+                for i in 0..ext_len { buf[8 + i] = b[dp + 1 + i].to_ascii_uppercase(); }
+            } else {
+                let take = base_len.min(6);
+                for i in 0..take { buf[i] = b[i].to_ascii_uppercase(); }
+                buf[6] = b'~';
+                buf[7] = b'1';
+                let ext_take = ext_len.min(3);
+                for i in 0..ext_take { buf[8 + i] = b[dp + 1 + i].to_ascii_uppercase(); }
+            }
         }
         None => {
             let n = b.len();
@@ -577,9 +585,32 @@ fn find_cluster_for_path(path: &str) -> Result<u32, &'static str> {
     let trimmed = path.trim_start_matches('/').trim_end_matches('/');
     if trimmed.is_empty() { return Ok(info.root_cluster); }
     let mut cluster = info.root_cluster;
+    
+    crate::print!("[SD] find_cluster_for_path: trimmed='{}' bytes=[", trimmed);
+    for &b in trimmed.as_bytes() {
+        crate::print!("{}, ", b);
+    }
+    crate::println!("]");
+
     for component in trimmed.split('/') {
         if component.is_empty() { continue; }
-        cluster = find_in_dir(cluster, component, &info)?;
+        
+        crate::print!("[SD]   component: '{}' bytes=[", component);
+        for &b in component.as_bytes() {
+            crate::print!("{}, ", b);
+        }
+        crate::println!("]");
+
+        match find_in_dir(cluster, component, &info) {
+            Ok(c) => {
+                crate::println!("[SD]   found component '{}' -> cluster={}", component, c);
+                cluster = c;
+            }
+            Err(e) => {
+                crate::println!("[SD]   failed to find component '{}': {}", component, e);
+                return Err(e);
+            }
+        }
     }
     Ok(cluster)
 }
@@ -902,40 +933,102 @@ pub fn write_file(path: &str, content: &[u8]) -> Result<(), &'static str> {
     }
 }
 
-pub fn read_file_to_buf(path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
-    unsafe {
-        let mgr = (*(&raw mut VOLUME_MGR)).as_mut().ok_or("ERR_NO_SD")?;
-        let volume = mgr.open_volume(VolumeIdx(0)).map_err(|_| "Failed to open Volume 0")?;
-        let raw_vol = volume.to_raw_volume();
-        let mut raw_dir = mgr.open_root_dir(raw_vol).map_err(|_| "Failed to open root directory")?;
-        let (parent, name) = split_path(path);
-        if !parent.is_empty() {
-            for component in parent.split('/') {
-                if component.is_empty() { continue; }
-                let next = try_open_dir(mgr, raw_dir, component)?;
-                let _ = mgr.close_dir(raw_dir);
-                raw_dir = next;
+/// Search a directory cluster for an entry, returning (cluster, file_size).
+fn find_in_dir_with_size(cluster: u32, name: &str, info: &Fat32Info) -> Result<(u32, u32), &'static str> {
+    let mut current = cluster;
+    let mut lfn_buf = [0u8; 256];
+    let mut lfn_len: usize = 0;
+    let mut lfn_ck: u8 = 0;
+    let spc = info.sectors_per_cluster as u32;
+
+    loop {
+        let sec0 = cluster_to_sector(current, info);
+        let mut end_hit = false;
+        for s in 0..spc {
+            let mut sector = [0u8; 512];
+            unsafe { raw_read_sector(sec0 + s, &mut sector)?; }
+            for i in 0..16u32 {
+                let o = (i * 32) as usize;
+                let e = &sector[o..o + 32];
+                if e[0] == 0x00 { end_hit = true; break; }
+                if e[0] == 0xE5 { lfn_len = 0; continue; }
+                if process_lfn_entry(e, &mut lfn_buf, &mut lfn_len, &mut lfn_ck) { continue; }
+                if sfn_entry_matches(e, name, &lfn_buf, lfn_len, lfn_ck) {
+                    return Ok((entry_cluster(e), entry_size(e)));
+                }
+                lfn_len = 0;
+            }
+            if end_hit { return Err("Not found"); }
+        }
+        current = next_cluster(current, info)?;
+        if current == 0 { return Err("Not found"); }
+    }
+}
+
+fn find_file_info(path: &str) -> Result<(u32, u32), &'static str> {
+    let info = unsafe { FAT32_INFO.ok_or("ERR_NO_SD")? };
+    let trimmed = path.trim_start_matches('/').trim_end_matches('/');
+    if trimmed.is_empty() { return Err("ERR_NO_SD"); }
+
+    // Find the parent directory cluster
+    let last_slash = trimmed.rfind('/');
+    let (parent_path, filename) = match last_slash {
+        Some(pos) => (&trimmed[..pos], &trimmed[pos + 1..]),
+        None => ("", trimmed),
+    };
+
+    crate::println!("[SD] find_file_info: path='{}', parent='{}', filename='{}'",
+        path, parent_path, filename);
+
+    let parent_cluster = if parent_path.is_empty() {
+        info.root_cluster
+    } else {
+        match find_cluster_for_path(parent_path) {
+            Ok(c) => c,
+            Err(e) => {
+                crate::println!("[SD] find_cluster_for_path failed: {}", e);
+                return Err(e);
             }
         }
-        let raw_file = try_open_file(mgr, raw_dir, name, embedded_sdmmc::Mode::ReadOnly)
-            .map_err(|_| "Failed to open file")?;
+    };
 
-        let mut offset = 0usize;
-        loop {
-            let mut chunk = [0u8; 512];
-            let n = mgr.read(raw_file, &mut chunk).map_err(|_| "Failed to read file")?;
-            if n == 0 { break; }
-            let end = core::cmp::min(offset + n, buf.len());
-            let copy_len = end - offset;
-            buf[offset..end].copy_from_slice(&chunk[..copy_len]);
-            offset = end;
-            if offset >= buf.len() { break; }
+    match find_in_dir_with_size(parent_cluster, filename, &info) {
+        Ok((c, s)) => {
+            crate::println!("[SD] found: cluster={}, size={}", c, s);
+            Ok((c, s))
         }
-        let _ = mgr.close_file(raw_file);
-        let _ = mgr.close_dir(raw_dir);
-        let _ = mgr.close_volume(raw_vol);
-        Ok(offset)
+        Err(e) => {
+            crate::println!("[SD] find_in_dir_with_size failed: {}", e);
+            Err(e)
+        }
     }
+}
+
+pub fn read_file_to_buf(path: &str, buf: &mut [u8]) -> Result<usize, &'static str> {
+    let (cluster, file_size) = find_file_info(path)?;
+    let info = unsafe { FAT32_INFO.ok_or("ERR_NO_SD")? };
+
+    let mut current = cluster;
+    let spc = info.sectors_per_cluster as u32;
+    let mut offset = 0usize;
+    let file_size = file_size as usize;
+
+    loop {
+        let sec0 = cluster_to_sector(current, &info);
+        for s in 0..spc {
+            if offset >= buf.len() || offset >= file_size { break; }
+            let mut sector = [0u8; 512];
+            unsafe { raw_read_sector(sec0 + s, &mut sector)?; }
+            let remaining = core::cmp::min(file_size - offset, buf.len() - offset);
+            let copy_len = core::cmp::min(512, remaining);
+            buf[offset..offset + copy_len].copy_from_slice(&sector[..copy_len]);
+            offset += copy_len;
+        }
+        if offset >= buf.len() || offset >= file_size { break; }
+        current = next_cluster(current, &info)?;
+        if current == 0 { break; }
+    }
+    Ok(offset)
 }
 
 pub fn delete_file(path: &str) -> Result<(), &'static str> {
@@ -967,50 +1060,15 @@ pub fn delete_file(path: &str) -> Result<(), &'static str> {
 }
 
 pub fn cat_file(path: &str) -> Result<(), &'static str> {
-    unsafe {
-        let mgr = (*(&raw mut VOLUME_MGR)).as_mut().ok_or("ERR_NO_SD")?;
-        let volume = mgr.open_volume(VolumeIdx(0)).map_err(|e| {
-            crate::println!("  [SD] open_volume error: {:?}", e);
-            "Failed to open Volume 0"
-        })?;
-        let raw_vol = volume.to_raw_volume();
-        let mut raw_dir = mgr.open_root_dir(raw_vol).map_err(|_| "Failed to open root directory")?;
-        let (parent, name) = split_path(path);
-        if !parent.is_empty() {
-            for component in parent.split('/') {
-                if component.is_empty() { continue; }
-                let next = try_open_dir(mgr, raw_dir, component).map_err(|e| {
-                    crate::println!("  [SD] open_dir('{}') failed: {}", component, e);
-                    e
-                })?;
-                let _ = mgr.close_dir(raw_dir);
-                raw_dir = next;
-            }
+    let mut buf = [0u8; 4096];
+    let n = read_file_to_buf(path, &mut buf)?;
+    let uart = crate::drivers::uart::RawUart;
+    for &b in &buf[..n] {
+        if b == b'\n' {
+            uart.write_byte(b'\r');
         }
-        let raw_file = try_open_file(mgr, raw_dir, name, embedded_sdmmc::Mode::ReadOnly)
-            .map_err(|e| {
-                crate::println!("  [SD] open_file('{}') failed: {}", name, e);
-                "Failed to open file"
-            })?;
-
-        let mut buf = [0u8; 128];
-        loop {
-            let n = mgr.read(raw_file, &mut buf).map_err(|_| "Failed to read file")?;
-            if n == 0 {
-                break;
-            }
-            let uart = crate::drivers::uart::RawUart;
-            for &b in &buf[..n] {
-                if b == b'\n' {
-                    uart.write_byte(b'\r');
-                }
-                uart.write_byte(b);
-            }
-        }
-        crate::println!();
-        let _ = mgr.close_file(raw_file);
-        let _ = mgr.close_dir(raw_dir);
-        let _ = mgr.close_volume(raw_vol);
-        Ok(())
+        uart.write_byte(b);
     }
+    crate::println!();
+    Ok(())
 }

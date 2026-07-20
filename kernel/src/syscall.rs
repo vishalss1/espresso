@@ -56,128 +56,31 @@ pub struct SyscallContext {
     pub pid: usize,
 }
 
-pub fn dispatch(ctx: &SyscallContext) -> i32 {
-    let cap_check = |cap: u32| -> bool {
-        crate::caps::check_cap(ctx.pid, cap)
-    };
+// ── Sub-dispatch functions (small to avoid LLVM register spill) ──────────
 
-    crate::event_log::log_syscall(ctx.num as u8, ctx.pid as u8);
-
+#[inline(never)]
+fn dispatch_gpio(ctx: &SyscallContext) -> i32 {
+    if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_GPIO) {
+        crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
+        return ERR_PERM;
+    }
     match ctx.num {
-        SYS_EXIT => {
-            crate::scheduler::kill_task(ctx.pid).ok();
-            ERR_OK
-        }
-        SYS_YIELD => {
-            crate::scheduler::scheduler_tick();
-            ERR_OK
-        }
-        SYS_SLEEP_MS => {
-            let ms = ctx.arg1;
-            let ticks = ms / 10;
-            for _ in 0..ticks {
-                unsafe { core::arch::asm!("nop"); }
-            }
-            ERR_OK
-        }
-        SYS_GPIO_READ => {
-            if !cap_check(crate::caps::CAP_GPIO) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            let pin = ctx.arg1 as u8;
-            unsafe { crate::gpio::gpio_read(pin) as i32 }
-        }
-        SYS_GPIO_WRITE => {
-            if !cap_check(crate::caps::CAP_GPIO) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            let pin = ctx.arg1 as u8;
-            let val = ctx.arg2 as u8;
-            unsafe { crate::gpio::gpio_write(pin, val); }
-            ERR_OK
-        }
-        SYS_GPIO_MODE => {
-            if !cap_check(crate::caps::CAP_GPIO) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            let pin = ctx.arg1 as u8;
-            let mode = ctx.arg2 as u8;
-            unsafe { crate::gpio::gpio_mode(pin, mode); }
-            ERR_OK
-        }
-        SYS_UART_READ => {
-            if !cap_check(crate::caps::CAP_TTY) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            let buf = ctx.arg1 as *mut u8;
-            let len = ctx.arg2 as usize;
-            unsafe {
-                let uart = crate::drivers::uart::RawUart;
-                let mut count = 0;
-                for i in 0..len {
-                    if let Some(b) = uart.read_byte() {
-                        core::ptr::write_volatile(buf.add(i), b);
-                        count += 1;
-                    } else {
-                        break;
-                    }
-                }
-                count as i32
-            }
-        }
-        SYS_UART_WRITE => {
-            if !cap_check(crate::caps::CAP_TTY) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            let buf = ctx.arg1 as *const u8;
-            let len = ctx.arg2 as usize;
-            unsafe {
-                let uart = crate::drivers::uart::RawUart;
-                for i in 0..len {
-                    let b = core::ptr::read_volatile(buf.add(i));
-                    uart.write_byte(b);
-                }
-            }
-            len as i32
-        }
-        SYS_I2C_READ => {
-            if !cap_check(crate::caps::CAP_I2C) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            ERR_NOT_FOUND
-        }
-        SYS_I2C_WRITE => {
-            if !cap_check(crate::caps::CAP_I2C) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            ERR_NOT_FOUND
-        }
-        SYS_SPI_TRANSFER => {
-            if !cap_check(crate::caps::CAP_SPI) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            ERR_NOT_FOUND
-        }
-        SYS_ADC_READ => {
-            if !cap_check(crate::caps::CAP_GPIO) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            ERR_NOT_FOUND
-        }
+        SYS_GPIO_READ => unsafe { crate::gpio::gpio_read(ctx.arg1 as u8) as i32 },
+        SYS_GPIO_WRITE => unsafe { crate::gpio::gpio_write(ctx.arg1 as u8, ctx.arg2 as u8); ERR_OK },
+        SYS_GPIO_MODE => unsafe { crate::gpio::gpio_mode(ctx.arg1 as u8, ctx.arg2 as u8); ERR_OK },
+        SYS_ADC_READ => ERR_NOT_FOUND,
+        _ => ERR_NOT_FOUND,
+    }
+}
+
+#[inline(never)]
+fn dispatch_file(ctx: &SyscallContext) -> i32 {
+    if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_FS_SD) {
+        crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
+        return ERR_PERM;
+    }
+    match ctx.num {
         SYS_FILE_OPEN => {
-            if !cap_check(crate::caps::CAP_FS_SD) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
             let path = ctx.arg1 as *const u8;
             let path_len = ctx.arg2 as usize;
             let flags = ctx.arg3;
@@ -192,10 +95,6 @@ pub fn dispatch(ctx: &SyscallContext) -> i32 {
             }
         }
         SYS_FILE_READ => {
-            if !cap_check(crate::caps::CAP_FS_SD) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
             let fd = ctx.arg1 as i32;
             let buf = ctx.arg2 as *mut u8;
             let len = ctx.arg3 as usize;
@@ -208,10 +107,6 @@ pub fn dispatch(ctx: &SyscallContext) -> i32 {
             }
         }
         SYS_FILE_WRITE => {
-            if !cap_check(crate::caps::CAP_FS_SD) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
             let fd = ctx.arg1 as i32;
             let buf = ctx.arg2 as *const u8;
             let len = ctx.arg3 as usize;
@@ -230,14 +125,8 @@ pub fn dispatch(ctx: &SyscallContext) -> i32 {
                 Err(_) => ERR_IO,
             }
         }
-        SYS_FILE_SEEK => {
-            ERR_NOT_FOUND
-        }
+        SYS_FILE_SEEK => ERR_NOT_FOUND,
         SYS_DIR_LIST => {
-            if !cap_check(crate::caps::CAP_FS_SD) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
             let path = ctx.arg1 as *const u8;
             let path_len = ctx.arg2 as usize;
             let buf = ctx.arg3 as *mut u8;
@@ -254,10 +143,6 @@ pub fn dispatch(ctx: &SyscallContext) -> i32 {
             }
         }
         SYS_FILE_DELETE => {
-            if !cap_check(crate::caps::CAP_FS_SD) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
             let path = ctx.arg1 as *const u8;
             let path_len = ctx.arg2 as usize;
             unsafe {
@@ -270,92 +155,18 @@ pub fn dispatch(ctx: &SyscallContext) -> i32 {
                 }
             }
         }
-        SYS_MSG_OPEN => {
-            if !cap_check(crate::caps::CAP_IPC) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            ERR_NOT_FOUND
-        }
-        SYS_MSG_SEND => {
-            if !cap_check(crate::caps::CAP_IPC) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            ERR_NOT_FOUND
-        }
-        SYS_MSG_RECV => {
-            if !cap_check(crate::caps::CAP_IPC) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            ERR_NOT_FOUND
-        }
-        SYS_MSG_CLOSE => {
-            if !cap_check(crate::caps::CAP_IPC) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            ERR_NOT_FOUND
-        }
-        SYS_TASK_SPAWN => {
-            if !cap_check(crate::caps::CAP_TASK_SPAWN) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            let entry = ctx.arg1 as usize;
-            let stack_size = ctx.arg2 as usize;
-            match crate::scheduler::spawn_task(entry, stack_size, crate::caps::CAP_ALL) {
-                Ok(pid) => {
-                    crate::event_log::log_task_spawn(pid as u8);
-                    pid as i32
-                }
-                Err(_) => ERR_NO_MEMORY,
-            }
-        }
-        SYS_TASK_KILL => {
-            if !cap_check(crate::caps::CAP_TASK_SPAWN) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            let pid = ctx.arg1 as usize;
-            match crate::scheduler::kill_task(pid) {
-                Ok(_) => {
-                    crate::event_log::log_task_kill(pid as u8);
-                    ERR_OK
-                }
-                Err(_) => ERR_NOT_FOUND,
-            }
-        }
-        SYS_MEM_INFO => {
-            let out = ctx.arg1 as *mut u8;
-            unsafe {
-                let buf = core::slice::from_raw_parts_mut(out, 16);
-                crate::mem::pool::mem_info(buf);
-            }
-            ERR_OK
-        }
-        SYS_TTY_WRITE => {
-            if !cap_check(crate::caps::CAP_TTY) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
-            let buf = ctx.arg1 as *const u8;
-            let len = ctx.arg2 as usize;
-            unsafe {
-                let uart = crate::drivers::uart::RawUart;
-                for i in 0..len {
-                    let b = core::ptr::read_volatile(buf.add(i));
-                    uart.write_byte(b);
-                }
-            }
-            len as i32
-        }
-        SYS_TTY_READ => {
-            if !cap_check(crate::caps::CAP_TTY) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
-            }
+        _ => ERR_NOT_FOUND,
+    }
+}
+
+#[inline(never)]
+fn dispatch_tty(ctx: &SyscallContext) -> i32 {
+    if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_TTY) {
+        crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
+        return ERR_PERM;
+    }
+    match ctx.num {
+        SYS_UART_READ | SYS_TTY_READ => {
             let buf = ctx.arg1 as *mut u8;
             let len = ctx.arg2 as usize;
             unsafe {
@@ -372,25 +183,107 @@ pub fn dispatch(ctx: &SyscallContext) -> i32 {
                 count as i32
             }
         }
-        SYS_PKG_INSTALL => {
-            ERR_NOT_FOUND
+        SYS_UART_WRITE | SYS_TTY_WRITE => {
+            let buf = ctx.arg1 as *const u8;
+            let len = ctx.arg2 as usize;
+            unsafe {
+                let uart = crate::drivers::uart::RawUart;
+                for i in 0..len {
+                    let b = core::ptr::read_volatile(buf.add(i));
+                    uart.write_byte(b);
+                }
+            }
+            len as i32
         }
-        SYS_SNAPSHOT_SAVE => {
-            if !cap_check(crate::caps::CAP_SNAPSHOT) {
+        _ => ERR_NOT_FOUND,
+    }
+}
+
+#[inline(never)]
+fn dispatch_task(ctx: &SyscallContext) -> i32 {
+    if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_TASK_SPAWN) {
+        crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
+        return ERR_PERM;
+    }
+    match ctx.num {
+        SYS_TASK_SPAWN => {
+            let entry = ctx.arg1 as usize;
+            let stack_size = ctx.arg2 as usize;
+            match crate::scheduler::spawn_task(entry, stack_size, crate::caps::CAP_ALL) {
+                Ok(pid) => {
+                    crate::event_log::log_task_spawn(pid as u8);
+                    pid as i32
+                }
+                Err(_) => ERR_NO_MEMORY,
+            }
+        }
+        SYS_TASK_KILL => {
+            let pid = ctx.arg1 as usize;
+            match crate::scheduler::kill_task(pid) {
+                Ok(_) => {
+                    crate::event_log::log_task_kill(pid as u8);
+                    ERR_OK
+                }
+                Err(_) => ERR_NOT_FOUND,
+            }
+        }
+        _ => ERR_NOT_FOUND,
+    }
+}
+
+// ── Main dispatch (small — just routes to sub-dispatchers) ───────────────
+
+#[inline(never)]
+fn dispatch_inner(ctx: &SyscallContext) -> i32 {
+    match ctx.num {
+        SYS_EXIT => {
+            crate::scheduler::kill_and_switch()
+        }
+        SYS_YIELD => {
+            crate::scheduler::scheduler_tick();
+            ERR_OK
+        }
+        SYS_SLEEP_MS => sleep_ms_handler(ctx.arg1),
+
+        SYS_GPIO_READ | SYS_GPIO_WRITE | SYS_GPIO_MODE | SYS_ADC_READ => {
+            dispatch_gpio(ctx)
+        }
+        SYS_I2C_READ | SYS_I2C_WRITE | SYS_SPI_TRANSFER => ERR_NOT_FOUND,
+
+        SYS_FILE_OPEN | SYS_FILE_READ | SYS_FILE_WRITE | SYS_FILE_CLOSE
+        | SYS_FILE_SEEK | SYS_DIR_LIST | SYS_FILE_DELETE => dispatch_file(ctx),
+
+        SYS_UART_READ | SYS_UART_WRITE | SYS_TTY_READ | SYS_TTY_WRITE => {
+            dispatch_tty(ctx)
+        }
+
+        SYS_TASK_SPAWN | SYS_TASK_KILL => dispatch_task(ctx),
+
+        SYS_MEM_INFO => {
+            let out = ctx.arg1 as *mut u8;
+            unsafe {
+                let buf = core::slice::from_raw_parts_mut(out, 16);
+                crate::mem::pool::mem_info(buf);
+            }
+            ERR_OK
+        }
+        SYS_MSG_OPEN | SYS_MSG_SEND | SYS_MSG_RECV | SYS_MSG_CLOSE => {
+            if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_IPC) {
                 crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
                 return ERR_PERM;
             }
             ERR_NOT_FOUND
         }
-        SYS_SNAPSHOT_RESTORE => {
-            if !cap_check(crate::caps::CAP_SNAPSHOT) {
+        SYS_PKG_INSTALL => ERR_NOT_FOUND,
+        SYS_SNAPSHOT_SAVE | SYS_SNAPSHOT_RESTORE => {
+            if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_SNAPSHOT) {
                 crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
                 return ERR_PERM;
             }
             ERR_NOT_FOUND
         }
         SYS_EVENT_LOG_READ => {
-            if !cap_check(crate::caps::CAP_EVENT_LOG) {
+            if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_EVENT_LOG) {
                 crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
                 return ERR_PERM;
             }
@@ -398,12 +291,11 @@ pub fn dispatch(ctx: &SyscallContext) -> i32 {
             let len = ctx.arg2 as usize;
             unsafe {
                 let buf_slice = core::slice::from_raw_parts_mut(buf, len);
-                let n = crate::event_log::drain_log(buf_slice);
-                n as i32
+                crate::event_log::drain_log(buf_slice) as i32
             }
         }
         SYS_DRIVER_LOAD => {
-            if !cap_check(crate::caps::CAP_DRIVER_LOAD) {
+            if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_DRIVER_LOAD) {
                 crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
                 return ERR_PERM;
             }
@@ -422,8 +314,7 @@ pub fn dispatch(ctx: &SyscallContext) -> i32 {
             let len = ctx.arg2 as usize;
             unsafe {
                 let buf_slice = core::slice::from_raw_parts_mut(buf, len);
-                let n = crate::panic_policy::read_crash_log(buf_slice);
-                n as i32
+                crate::panic_policy::read_crash_log(buf_slice) as i32
             }
         }
         _ => {
@@ -431,4 +322,38 @@ pub fn dispatch(ctx: &SyscallContext) -> i32 {
             ERR_NOT_FOUND
         }
     }
+}
+
+#[inline(never)]
+pub fn dispatch(ctx: &SyscallContext) -> i32 {
+    crate::event_log::log_syscall(ctx.num as u8, ctx.pid as u8);
+    dispatch_inner(ctx)
+}
+
+#[inline(never)]
+fn sleep_ms_handler(ms: u32) -> i32 {
+    let mut start: u32;
+    unsafe { core::arch::asm!("rsr {0}, ccount", out(reg) start); }
+    let cycles = ms.wrapping_mul(240_000);
+    crate::println!("[SLEEP] ms={}, cycles={}, start={}", ms, cycles, start);
+    let mut count = 0;
+    loop {
+        let mut now: u32;
+        unsafe { core::arch::asm!("rsr {0}, ccount", out(reg) now); }
+        let diff = now.wrapping_sub(start);
+        if diff >= cycles { 
+            crate::println!("[SLEEP_DONE] diff={}, cycles={}, count={}", diff, cycles, count);
+            break; 
+        }
+        count += 1;
+        crate::scheduler::scheduler_tick();
+    }
+    ERR_OK
+}
+
+/// extern "C" entry point called from the assembly exception handler in switch.S.
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn syscall_dispatch_c(ctx: &mut SyscallContext) -> i32 {
+    dispatch(ctx)
 }

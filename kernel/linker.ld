@@ -23,7 +23,10 @@ MEMORY {
     STATIC_DATA (rw) : ORIGIN = 0x3FFB0000, LENGTH = 21K
     TASK_STACKS (rw) : ORIGIN = 0x3FFB5400, LENGTH = 10K
     FORTH_DICT  (rw) : ORIGIN = 0x3FFB7C00, LENGTH = 18K
-    EXEC_POOL   (rw) : ORIGIN = 0x3FFBC800, LENGTH = 328K
+    LARGE_BSS   (rw) : ORIGIN = 0x3FFD0800, LENGTH = 120K
+    EXEC_POOL   (rw) : ORIGIN = 0x3FFBC800, LENGTH = 80K
+
+    /* No separate VEC_TABLE region — vector table is in .text (IROM). */
 }
 
 /*
@@ -62,6 +65,7 @@ SECTIONS {
      *   _start     = 0x400D0000 + offset_of(_start_in_.text
      */
     .text : ALIGN(4) {
+        *(.vec .vec.*)          /* Vector table FIRST (at IROM base, 4KB-aligned) */
         *(.literal .literal.*)
         *(.text .text.*)
         . = ALIGN(4);
@@ -96,6 +100,12 @@ SECTIONS {
         . = ALIGN(4);
         _bss_end = .;
     } > STATIC_DATA :NONE
+
+    .large_bss (NOLOAD) : {
+        . = ALIGN(4);
+        *(.large_bss)
+        . = ALIGN(4);
+    } > LARGE_BSS
 
     /* Export region base addresses for Rust kernel code */
     _task_stacks_start = ORIGIN(TASK_STACKS);

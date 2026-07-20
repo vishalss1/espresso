@@ -224,7 +224,6 @@ fn fill_input() {
         INPUT_LEN = 0;
         INPUT_POS = 0;
         loop {
-            crate::keyboard::poll();
             if let Some(b) = crate::tty::poll_read() {
                 if b == b'\r' || b == b'\n' {
                     crate::tty::write_both(b'\r');
@@ -620,7 +619,6 @@ fn execute_builtin(id: u32) {
         }
         W_KEY => {
             loop {
-                crate::keyboard::poll();
                 if let Some(b) = crate::tty::poll_read() {
                     ds_push(b as u32);
                     break;
