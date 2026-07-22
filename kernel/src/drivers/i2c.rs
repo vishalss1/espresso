@@ -1,6 +1,5 @@
 //! I2C driver — bit-banged master on GPIO21 (SDA) / GPIO22 (SCL)
 //!
-//! Dedicated bus for SSD1306 display at 0x3C. No bus sharing.
 //! Uses open-drain outputs with internal pull-ups.
 
 const SDA_PIN: u8 = 21;
@@ -19,15 +18,9 @@ const IO_MUX_GPIO22: u32 = IO_MUX_BASE + 0x080;
 
 #[inline(always)]
 fn delay_half() {
-    // ~1.7us at 240MHz. For ~150KHz I2C, period ≈ 6.6us, half ≈ 3.3us.
-    // ~400 NOPs ≈ 1.7us; with loop overhead ≈ 3.3us per half-period.
     let mut n: u32 = 400;
     unsafe { core::arch::asm!("1: addi {0}, {0}, -1; bnez {0}, 1b", inout(reg) n); }
 }
-
-/// Open-drain I2C: "high" = release bus (disable output, pull-up brings pin high).
-/// "low" = drive bus low (set output to 0, enable output).
-/// Using GPIO_OUT_W1TC to pre-clear output bit so enabling output drives low.
 
 #[inline(always)]
 fn sda_low() {
@@ -69,12 +62,8 @@ pub fn init() {
         core::ptr::write_volatile(IO_MUX_GPIO21 as *mut u32, (1 << 8) | 0);
         core::ptr::write_volatile(IO_MUX_GPIO22 as *mut u32, (1 << 8) | 0);
 
-        // Pre-clear output values (so when output is enabled, it drives low)
-        core::ptr::write_volatile(GPIO_OUT_W1TC as *mut u32,
-            (1 << SDA_PIN) | (1 << SCL_PIN));
-
-        // Both lines released (output disabled → pulled high by pull-ups)
-        // No GPIO_ENABLE_W1TS here — open-drain: high = output disabled
+        // Pre-clear output values
+        core::ptr::write_volatile(GPIO_OUT_W1TC as *mut u32, (1 << SDA_PIN) | (1 << SCL_PIN));
     }
 }
 
@@ -106,26 +95,24 @@ fn write_bit(bit: bool) {
     delay_half();
 }
 
-/// Write one byte. Returns true if ACK received.
 fn write_byte(b: u8) -> bool {
     for i in (0..8).rev() {
         write_bit((b >> i) & 1 != 0);
     }
     // Read ACK
-    sda_high(); // float SDA for slave ACK
+    sda_high();
     delay_half();
     scl_high();
     delay_half();
-    let ack = !sda_read(); // ACK = low
+    let ack = !sda_read();
     scl_low();
     delay_half();
     ack
 }
 
-/// Write buffer to a 7-bit I2C address. Returns true on success.
 pub fn write(addr7: u8, data: &[u8]) -> bool {
     start();
-    let ack1 = write_byte(addr7 << 1); // write address
+    let ack1 = write_byte(addr7 << 1);
     if !ack1 {
         stop();
         return false;
@@ -140,14 +127,12 @@ pub fn write(addr7: u8, data: &[u8]) -> bool {
     true
 }
 
-/// Write with repeated start + read (for SSD1306 status queries).
 pub fn write_read(addr7: u8, tx: &[u8], rx: &mut [u8]) -> bool {
     start();
     if !write_byte(addr7 << 1) { stop(); return false; }
     for &b in tx {
         if !write_byte(b) { stop(); return false; }
     }
-    // Repeated start
     start();
     if !write_byte((addr7 << 1) | 1) { stop(); return false; }
     for i in 0..rx.len() {
@@ -158,11 +143,9 @@ pub fn write_read(addr7: u8, tx: &[u8], rx: &mut [u8]) -> bool {
         rx[i] = if sda_read() { 0xFF } else { 0x00 };
         scl_low();
         delay_half();
-        // NACK last byte, ACK others
         if i == rx.len() - 1 {
             // NACK
         } else {
-            // ACK — pull SDA low
             sda_low();
             delay_half();
             scl_high();

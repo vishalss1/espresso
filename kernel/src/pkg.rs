@@ -2,7 +2,7 @@
 //! SD-local packages in /pkg/<name>/ with manifest.txt + main.espr + data/.
 //! SHA-256 verified installs, atomic write (delete + write pattern).
 
-use crate::drivers::sd;
+// SD driver is now loaded from user space
 
 pub const MAX_PACKAGES: usize = 16;
 pub const MAX_PKG_NAME: usize = 24;
@@ -270,71 +270,8 @@ pub fn pkg_list() {
 }
 
 pub fn pkg_install(name: &str) -> Result<(), &'static str> {
-    let mut manifest_path = [0u8; 64];
-    let manifest_len = make_pkg_path(name, "manifest.txt", &mut manifest_path);
-    let manifest_str = core::str::from_utf8(&manifest_path[..manifest_len]).map_err(|_| "ERR_BAD_PATH")?;
-
-    unsafe {
-        let mlen = sd::read_file_to_buf(manifest_str, &mut MBUF).map_err(|e| e)?;
-
-        if mlen == 0 { return Err("ERR_EMPTY_MANIFEST"); }
-
-        let manifest = parse_manifest(&MBUF[..mlen]);
-        if manifest.name_len == 0 { return Err("ERR_NO_NAME_IN_MANIFEST"); }
-
-        let mut espr_path = [0u8; 64];
-        let espr_len = make_pkg_path(name, "main.espr", &mut espr_path);
-        let espr_str = core::str::from_utf8(&espr_path[..espr_len]).map_err(|_| "ERR_BAD_PATH")?;
-
-        let elen = sd::read_file_to_buf(espr_str, &mut EBUF).map_err(|e| e)?;
-
-        if elen == 0 { return Err("ERR_EMPTY_ESPR"); }
-
-        if manifest.sha256_valid {
-            let mut computed = [0u8; 64];
-            sha256_hex(&EBUF[..elen], &mut computed);
-            if computed != manifest.sha256 {
-                crate::tty::write_str_both("  WARN: hash mismatch!\n  expected: ");
-                let expected_str = core::str::from_utf8(&manifest.sha256).unwrap_or("?");
-                crate::tty::write_str_both(expected_str);
-                crate::tty::write_str_both("\n  computed: ");
-                let computed_str = core::str::from_utf8(&computed).unwrap_or("?");
-                crate::tty::write_str_both(computed_str);
-                crate::tty::write_str_both("\n");
-                return Err("ERR_HASH_MISMATCH");
-            }
-            crate::tty::write_str_both("  hash OK\n");
-        } else {
-            crate::tty::write_str_both("  WARN: no sha256 in manifest, skipping verify\n");
-        }
-
-        let mut found = false;
-        for i in 0..PACKAGE_COUNT {
-            if PACKAGES[i].name_len as usize == name.len()
-                && &PACKAGES[i].name[..name.len()] == name.as_bytes()
-            {
-                PACKAGES[i].version_len = manifest.version_len as u8;
-                PACKAGES[i].version[..manifest.version_len].copy_from_slice(&manifest.version[..manifest.version_len]);
-                PACKAGES[i].installed = true;
-                found = true;
-                break;
-            }
-        }
-        if !found && PACKAGE_COUNT < MAX_PACKAGES {
-            let pkg = &mut PACKAGES[PACKAGE_COUNT];
-            pkg.name_len = name.len() as u8;
-            pkg.name[..name.len()].copy_from_slice(name.as_bytes());
-            pkg.version_len = manifest.version_len as u8;
-            pkg.version[..manifest.version_len].copy_from_slice(&manifest.version[..manifest.version_len]);
-            pkg.installed = true;
-            PACKAGE_COUNT += 1;
-        }
-    }
-
-    crate::tty::write_str_both("  installed '");
-    crate::tty::write_str_both(name);
-    crate::tty::write_str_both("'\n");
-    Ok(())
+    crate::println!("[PKG] pkg_install requested for '{}' but SD driver is not in kernel space", name);
+    Err("ERR_SD_DRIVER_NOT_LOADED")
 }
 
 pub fn pkg_update(name: &str) -> Result<(), &'static str> {
@@ -345,37 +282,8 @@ pub fn pkg_update(name: &str) -> Result<(), &'static str> {
 }
 
 pub fn pkg_verify(name: &str) -> Result<(), &'static str> {
-    let mut manifest_path = [0u8; 64];
-    let manifest_len = make_pkg_path(name, "manifest.txt", &mut manifest_path);
-    let manifest_str = core::str::from_utf8(&manifest_path[..manifest_len]).map_err(|_| "ERR_BAD_PATH")?;
-
-    unsafe {
-        let mlen = sd::read_file_to_buf(manifest_str, &mut MBUF).map_err(|e| e)?;
-
-        if mlen == 0 { return Err("ERR_EMPTY_MANIFEST"); }
-        let manifest = parse_manifest(&MBUF[..mlen]);
-
-        let mut espr_path = [0u8; 64];
-        let espr_len = make_pkg_path(name, "main.espr", &mut espr_path);
-        let espr_str = core::str::from_utf8(&espr_path[..espr_len]).map_err(|_| "ERR_BAD_PATH")?;
-
-        let elen = sd::read_file_to_buf(espr_str, &mut EBUF).map_err(|e| e)?;
-
-        if !manifest.sha256_valid {
-            return Err("ERR_NO_SHA256");
-        }
-
-        let mut computed = [0u8; 64];
-        sha256_hex(&EBUF[..elen], &mut computed);
-
-        if computed == manifest.sha256 {
-            crate::tty::write_str_both("  verify OK\n");
-            Ok(())
-        } else {
-            crate::tty::write_str_both("  ERR: hash mismatch\n");
-            Err("ERR_HASH_MISMATCH")
-        }
-    }
+    crate::println!("[PKG] pkg_verify requested for '{}' but SD driver is not in kernel space", name);
+    Err("ERR_SD_DRIVER_NOT_LOADED")
 }
 
 pub fn pkg_uninstall(name: &str) -> Result<(), &'static str> {

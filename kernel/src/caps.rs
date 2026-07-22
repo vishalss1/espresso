@@ -3,7 +3,7 @@
 pub const CAP_GPIO: u32 = 1 << 0;
 pub const CAP_SPI: u32 = 1 << 1;
 pub const CAP_I2C: u32 = 1 << 2;
-pub const CAP_FS_SD: u32 = 1 << 3;
+pub const CAP_FS_STORE: u32 = 1 << 3;
 pub const CAP_FS_PROC: u32 = 1 << 4;
 pub const CAP_IPC: u32 = 1 << 5;
 pub const CAP_TASK_SPAWN: u32 = 1 << 6;
@@ -20,9 +20,9 @@ pub static mut CAP_TABLE: [u32; MAX_TASKS] = [CAP_NONE; MAX_TASKS];
 pub fn init_caps() {
     unsafe {
         CAP_TABLE[0] = CAP_ALL;
-        CAP_TABLE[1] = CAP_GPIO | CAP_FS_SD | CAP_FS_PROC | CAP_IPC | CAP_TASK_SPAWN | CAP_TTY | CAP_EVENT_LOG;
-        CAP_TABLE[2] = CAP_GPIO | CAP_FS_SD | CAP_IPC;
-        CAP_TABLE[3] = CAP_GPIO | CAP_FS_SD | CAP_IPC;
+        CAP_TABLE[1] = CAP_GPIO | CAP_FS_STORE | CAP_FS_PROC | CAP_IPC | CAP_TASK_SPAWN | CAP_TTY | CAP_EVENT_LOG;
+        CAP_TABLE[2] = CAP_GPIO | CAP_FS_STORE | CAP_IPC;
+        CAP_TABLE[3] = CAP_GPIO | CAP_FS_STORE | CAP_IPC;
     }
 }
 

@@ -56,6 +56,19 @@ pub struct SyscallContext {
     pub pid: usize,
 }
 
+fn read_user_byte(addr: usize) -> u8 {
+    if addr >= 0x40080000 && addr < 0x400C0000 {
+        let aligned = addr & !3;
+        let shift = (addr & 3) * 8;
+        unsafe {
+            let word = core::ptr::read_volatile(aligned as *const u32);
+            ((word >> shift) & 0xFF) as u8
+        }
+    } else {
+        unsafe { core::ptr::read_volatile(addr as *const u8) }
+    }
+}
+
 // ── Sub-dispatch functions (small to avoid LLVM register spill) ──────────
 
 #[inline(never)]
@@ -75,19 +88,24 @@ fn dispatch_gpio(ctx: &SyscallContext) -> i32 {
 
 #[inline(never)]
 fn dispatch_file(ctx: &SyscallContext) -> i32 {
-    if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_FS_SD) {
+    if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_FS_STORE) {
         crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
         return ERR_PERM;
     }
     match ctx.num {
         SYS_FILE_OPEN => {
-            let path = ctx.arg1 as *const u8;
+            let path_addr = ctx.arg1 as usize;
             let path_len = ctx.arg2 as usize;
             let flags = ctx.arg3;
+            let mut path_buf = [0u8; 128];
+            if path_len >= path_buf.len() {
+                return ERR_NOT_FOUND;
+            }
+            for i in 0..path_len {
+                path_buf[i] = read_user_byte(path_addr + i);
+            }
             unsafe {
-                let path_str = core::str::from_utf8_unchecked(
-                    core::slice::from_raw_parts(path, path_len)
-                );
+                let path_str = core::str::from_utf8_unchecked(&path_buf[..path_len]);
                 match crate::vfs::vfs_open(path_str, flags) {
                     Ok(fd) => fd,
                     Err(_) => ERR_NOT_FOUND,
@@ -108,15 +126,26 @@ fn dispatch_file(ctx: &SyscallContext) -> i32 {
         }
         SYS_FILE_WRITE => {
             let fd = ctx.arg1 as i32;
-            let buf = ctx.arg2 as *const u8;
+            let buf_addr = ctx.arg2 as usize;
             let len = ctx.arg3 as usize;
-            unsafe {
-                let buf_slice = core::slice::from_raw_parts(buf, len);
-                match crate::vfs::vfs_write(fd, buf_slice) {
-                    Ok(n) => n as i32,
-                    Err(_) => ERR_IO,
+            let mut written = 0;
+            let mut chunk = [0u8; 64];
+            while written < len {
+                let chunk_len = core::cmp::min(len - written, 64);
+                for i in 0..chunk_len {
+                    chunk[i] = read_user_byte(buf_addr + written + i);
+                }
+                match crate::vfs::vfs_write(fd, &chunk[..chunk_len]) {
+                    Ok(n) => {
+                        written += n;
+                        if n < chunk_len {
+                            break;
+                        }
+                    }
+                    Err(_) => return if written > 0 { written as i32 } else { ERR_IO },
                 }
             }
+            written as i32
         }
         SYS_FILE_CLOSE => {
             let fd = ctx.arg1 as i32;
@@ -127,14 +156,19 @@ fn dispatch_file(ctx: &SyscallContext) -> i32 {
         }
         SYS_FILE_SEEK => ERR_NOT_FOUND,
         SYS_DIR_LIST => {
-            let path = ctx.arg1 as *const u8;
+            let path_addr = ctx.arg1 as usize;
             let path_len = ctx.arg2 as usize;
             let buf = ctx.arg3 as *mut u8;
             let buf_len = ctx.arg4 as usize;
+            let mut path_buf = [0u8; 128];
+            if path_len >= path_buf.len() {
+                return ERR_NOT_FOUND;
+            }
+            for i in 0..path_len {
+                path_buf[i] = read_user_byte(path_addr + i);
+            }
             unsafe {
-                let path_str = core::str::from_utf8_unchecked(
-                    core::slice::from_raw_parts(path, path_len)
-                );
+                let path_str = core::str::from_utf8_unchecked(&path_buf[..path_len]);
                 let buf_slice = core::slice::from_raw_parts_mut(buf, buf_len);
                 match crate::vfs::vfs_dir_list(path_str, buf_slice) {
                     Ok(n) => n as i32,
@@ -143,12 +177,17 @@ fn dispatch_file(ctx: &SyscallContext) -> i32 {
             }
         }
         SYS_FILE_DELETE => {
-            let path = ctx.arg1 as *const u8;
+            let path_addr = ctx.arg1 as usize;
             let path_len = ctx.arg2 as usize;
+            let mut path_buf = [0u8; 128];
+            if path_len >= path_buf.len() {
+                return ERR_NOT_FOUND;
+            }
+            for i in 0..path_len {
+                path_buf[i] = read_user_byte(path_addr + i);
+            }
             unsafe {
-                let path_str = core::str::from_utf8_unchecked(
-                    core::slice::from_raw_parts(path, path_len)
-                );
+                let path_str = core::str::from_utf8_unchecked(&path_buf[..path_len]);
                 match crate::vfs::vfs_file_delete(path_str) {
                     Ok(_) => ERR_OK,
                     Err(_) => ERR_NOT_FOUND,
@@ -184,16 +223,27 @@ fn dispatch_tty(ctx: &SyscallContext) -> i32 {
             }
         }
         SYS_UART_WRITE | SYS_TTY_WRITE => {
-            let buf = ctx.arg1 as *const u8;
-            let len = ctx.arg2 as usize;
-            unsafe {
-                let uart = crate::drivers::uart::RawUart;
-                for i in 0..len {
-                    let b = core::ptr::read_volatile(buf.add(i));
+            let buf_addr = ctx.arg1 as usize;
+            let len = ctx.arg2 as i32;
+            let uart = crate::drivers::uart::RawUart;
+            if len < 0 {
+                let mut count = 0;
+                loop {
+                    let b = read_user_byte(buf_addr + count);
+                    if b == 0 {
+                        break;
+                    }
+                    uart.write_byte(b);
+                    count += 1;
+                }
+                count as i32
+            } else {
+                for i in 0..len as usize {
+                    let b = read_user_byte(buf_addr + i);
                     uart.write_byte(b);
                 }
+                len
             }
-            len as i32
         }
         _ => ERR_NOT_FOUND,
     }
@@ -299,7 +349,44 @@ fn dispatch_inner(ctx: &SyscallContext) -> i32 {
                 crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
                 return ERR_PERM;
             }
-            ERR_NOT_FOUND
+            return ERR_NO_SD;
+            let path_addr = ctx.arg1 as usize;
+            let path_len = ctx.arg2 as usize;
+            let mut path_buf = [0u8; 128];
+            if path_len >= path_buf.len() {
+                return ERR_NOT_FOUND;
+            }
+            for i in 0..path_len {
+                path_buf[i] = read_user_byte(path_addr + i);
+            }
+            unsafe {
+                let path_str = core::str::from_utf8_unchecked(&path_buf[..path_len]);
+                let prog = match crate::loader::load_from_storage(path_str) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return match e {
+                            crate::loader::LoaderError::NoMemory => ERR_NO_MEMORY,
+                            crate::loader::LoaderError::ReadError(_) => ERR_NOT_FOUND,
+                            _ => ERR_IO,
+                        };
+                    }
+                };
+                let name = path_str.rsplit('/').next().unwrap_or(path_str);
+                match crate::driver::load_driver(name, &prog) {
+                    Ok(slot) => {
+                        if prog.entry != 0 {
+                            let init_fn: extern "C" fn() -> i32 = core::mem::transmute(prog.entry);
+                            let result = init_fn();
+                            crate::println!("sys_driver_load: driver_init() returned {}", result);
+                        }
+                        slot as i32
+                    }
+                    Err(_) => {
+                        crate::loader::unload(&prog);
+                        ERR_NO_MEMORY
+                    }
+                }
+            }
         }
         SYS_CAP_QUERY => {
             let pid = ctx.arg1 as usize;

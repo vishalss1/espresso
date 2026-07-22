@@ -10,7 +10,7 @@ pub struct VfsEntry {
 }
 
 pub enum VfsHandler {
-    SdCard,
+    Storage,
     GpioRead(u8),
     GpioWrite(u8),
     GpioMode(u8),
@@ -26,22 +26,22 @@ pub enum VfsHandler {
 }
 
 pub static mut VFS_TABLE: [VfsEntry; MAX_VFS_ENTRIES] = [
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
-    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::SdCard },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
+    VfsEntry { path: [0; MAX_PATH_LEN], path_len: 0, handler: VfsHandler::Storage },
 ];
 
 pub fn register_entry(path: &str, handler: VfsHandler) -> Result<(), &'static str> {
@@ -72,7 +72,7 @@ pub fn init_vfs() {
     unsafe {
         for entry in VFS_TABLE.iter_mut() { entry.path_len = 0; entry.path[..].fill(0); }
     }
-    let _ = register_entry("/sd", VfsHandler::SdCard);
+    let _ = register_entry("/store", VfsHandler::Storage);
     let _ = register_entry("/dev/gpio", VfsHandler::GpioRead(0));
     let _ = register_entry("/dev/i2c", VfsHandler::I2cRead);
     let _ = register_entry("/dev/spi", VfsHandler::SpiRead);
@@ -87,7 +87,7 @@ pub fn vfs_open(path: &str, _flags: u32) -> Result<i32, &'static str> {
     match resolve(path) {
         Some(entry) => {
             match &entry.handler {
-                VfsHandler::SdCard => Ok(0),
+                VfsHandler::Storage => Ok(0),
                 VfsHandler::GpioRead(pin) => Ok(*pin as i32),
                 VfsHandler::ProcTasks => Ok(100),
                 VfsHandler::ProcMem => Ok(101),
@@ -112,7 +112,7 @@ pub fn vfs_read(fd: i32, buf: &mut [u8]) -> Result<usize, &'static str> {
         }
         104 => Ok(crate::panic_policy::read_crash_log(buf)),
         0 => {
-            crate::println!("(SD read via VFS not yet routed)");
+            crate::println!("(Storage read via VFS not yet routed)");
             Ok(0)
         }
         _ => Err("ERR_BAD_FD"),
@@ -132,11 +132,10 @@ pub fn vfs_write(fd: i32, buf: &[u8]) -> Result<usize, &'static str> {
 pub fn vfs_close(_fd: i32) -> Result<(), &'static str> { Ok(()) }
 
 pub fn vfs_dir_list(path: &str, _buf: &mut [u8]) -> Result<usize, &'static str> {
-    if path.starts_with("/sd") || path == "/" {
-        let _ = crate::drivers::sd::list_dir(path)?;
+    if path == "/" {
         Ok(0)
     } else {
-        Err("ERR_NOT_FOUND")
+        Err("ERR_FS_DRIVER_NOT_LOADED")
     }
 }
 

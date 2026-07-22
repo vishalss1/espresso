@@ -100,67 +100,7 @@ pub fn clear_crash_loop() {
     unsafe { CRASH_COUNT = 0; }
 }
 
-pub fn recovery_prompt() {
-    crate::println!("");
-    crate::println!("!!! CRASH LOOP DETECTED !!!");
-    crate::println!("Entering recovery mode. Type 'help' for options.");
-    crate::println!("");
 
-    let mut input_buf = [0u8; 64];
-    let mut input_len = 0;
-    let uart = crate::drivers::uart::RawUart;
-
-    loop {
-        if let Some(b) = uart.read_byte() {
-            if b == b'\r' || b == b'\n' {
-                crate::println!();
-                if input_len > 0 {
-                    if let Ok(cmd_str) = core::str::from_utf8(&input_buf[..input_len]) {
-                        match cmd_str {
-                            "help" => {
-                                crate::println!("Recovery commands:");
-                                crate::println!("  clear    Clear crash counter and reboot");
-                                crate::println!("  log      Show crash log");
-                                crate::println!("  reboot   Force reboot");
-                            }
-                            "clear" => {
-                                clear_crash_loop();
-                                crate::println!("Crash counter cleared. Rebooting...");
-                                reset_system();
-                            }
-                            "log" => {
-                                let mut log_buf = [0u8; 512];
-                                let n = read_crash_log(&mut log_buf);
-                                for i in 0..n { uart.write_byte(log_buf[i]); }
-                                crate::println!();
-                            }
-                            "reboot" => {
-                                crate::println!("Rebooting...");
-                                reset_system();
-                            }
-                            _ => { crate::println!("Unknown command. Type 'help'."); }
-                        }
-                        input_len = 0;
-                    }
-                }
-                crate::print!("recovery# ");
-            } else if b == 8 || b == 127 {
-                if input_len > 0 {
-                    input_len -= 1;
-                    uart.write_byte(8);
-                    uart.write_byte(b' ');
-                    uart.write_byte(8);
-                }
-            } else if b >= 32 && b <= 126 {
-                if input_len < input_buf.len() {
-                    input_buf[input_len] = b;
-                    input_len += 1;
-                    uart.write_byte(b);
-                }
-            }
-        }
-    }
-}
 
 pub fn reset_system() -> ! {
     unsafe {

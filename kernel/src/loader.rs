@@ -47,6 +47,14 @@ pub fn dram_to_iram(addr: usize) -> usize {
     }
 }
 
+pub fn iram_to_dram(addr: usize) -> usize {
+    if addr >= DIRAM_IBUS_BASE && addr < DIRAM_IBUS_BASE + DIRAM_SIZE {
+        addr - DIRAM_OFFSET
+    } else {
+        addr
+    }
+}
+
 pub const MAGIC: u32 = 0x45535052; // "ESPR"
 pub const HEADER_SIZE: usize = 0x20;
 
@@ -134,10 +142,8 @@ pub fn load(data: &[u8]) -> Result<LoadedProgram, LoaderError> {
     crate::println!("[LOAD] code_size={}, data_size={}, bss_size={}, pages_needed={}",
         code_size, data_size, bss_size, pages_needed);
     let base_dram = pool::alloc_pages(pages_needed).ok_or(LoaderError::NoMemory)?;
-
     // Translate the DRAM pool address to its IRAM instruction-bus alias.
     // This is the address the CPU uses to FETCH instructions.
-    // We write code directly to this IRAM address to avoid DRAM→IRAM bus ambiguity.
     let iram_base = dram_to_iram(base_dram);
     crate::println!("[LOAD] base_dram=0x{:08X} iram_base=0x{:08X}", base_dram, iram_base);
 
@@ -146,16 +152,6 @@ pub fn load(data: &[u8]) -> Result<LoadedProgram, LoaderError> {
         let src_payload = &data[HEADER_SIZE..HEADER_SIZE + code_size + data_size];
 
         // 1. Write code/data directly to IRAM addresses (instruction bus alias).
-        //
-        // KEY INSIGHT: On ESP32, the DIRAM region allows both bus paths to the same
-        // physical SRAM. However, writing to the DRAM alias and reading back via IRAM
-        // showed a mismatch — suggesting the store buffer/pipeline does not guarantee
-        // IRAM alias visibility after a DRAM write until a full memw+dsync+isync fence.
-        //
-        // Writing directly to IRAM addresses avoids the issue entirely — the CPU
-        // writes to SRAM via the instruction bus address space, and instruction fetch
-        // from the same IRAM address sees fresh data immediately.
-        //
         // All stores must be 32-bit word-aligned (IRAM requirement).
         for i in 0..word_count {
             let src_off = i * 4;
@@ -178,9 +174,7 @@ pub fn load(data: &[u8]) -> Result<LoadedProgram, LoaderError> {
             }
         }
 
-        // 3. Patch relocations.
-        // Relocatable addresses in the binary are relative offsets that need to be
-        // fixed up to absolute IRAM addresses once we know iram_base.
+        // 3. Patch relocations in IRAM.
         if reloc_count > 0 {
             let reloc_off = header.reloc_offset as usize;
             if reloc_off + reloc_count * 4 > data.len() {
@@ -220,9 +214,6 @@ pub fn load(data: &[u8]) -> Result<LoadedProgram, LoaderError> {
         };
         crate::println!("[LOAD] IRAM[0]=0x{:08X} expected=0x{:08X} entry=0x{:08X}",
             first_word_iram, expected_word, iram_entry);
-        if first_word_iram != expected_word {
-            crate::println!("[LOAD] *** IRAM write FAILED — bytes not visible at IRAM address ***");
-        }
 
         // Flush instruction pipeline after writing new code to IRAM.
         // memw: drain data-bus store buffer
@@ -253,13 +244,7 @@ pub fn unload(prog: &LoadedProgram) {
 #[link_section = ".large_bss"]
 static mut FILE_DATA: [u8; 4096] = [0u8; 4096];
 
-pub fn load_from_sd(path: &str) -> Result<LoadedProgram, LoaderError> {
-    use crate::drivers::sd;
-    crate::println!("[LOAD] Loading binary from SD: '{}'", path);
-    unsafe {
-        crate::println!("[LOAD] Reading SD file into static FILE_DATA buffer (max 4096 bytes)");
-        let offset = sd::read_file_to_buf(path, &mut FILE_DATA).map_err(|e| LoaderError::ReadError(e))?;
-        crate::println!("[LOAD] Read successful: {} bytes read into FILE_DATA", offset);
-        load(&FILE_DATA[..offset])
-    }
+pub fn load_from_storage(path: &str) -> Result<LoadedProgram, LoaderError> {
+    crate::println!("[LOAD] load_from_storage requested for '{}' but storage driver is not in kernel space", path);
+    Err(LoaderError::ReadError("storage driver not in kernel"))
 }

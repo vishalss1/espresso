@@ -109,7 +109,6 @@ SECTIONS {
 
     /* Export region base addresses for Rust kernel code */
     _task_stacks_start = ORIGIN(TASK_STACKS);
-    _forth_dict_start  = ORIGIN(FORTH_DICT);
     _exec_pool_start   = ORIGIN(EXEC_POOL);
 
     /* Discard debug/metadata sections */

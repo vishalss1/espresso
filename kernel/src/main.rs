@@ -8,10 +8,8 @@ pub mod drivers {
     pub mod uart;
     pub mod spi;
     pub mod delay;
-    pub mod sd;
     pub mod i2c;
 }
-pub mod shell;
 pub mod scheduler;
 pub mod mem {
     pub mod pool;
@@ -25,9 +23,6 @@ pub mod panic_policy;
 pub mod gpio;
 pub mod ipc;
 pub mod tty;
-pub mod display;
-pub mod forth;
-pub mod editor;
 pub mod pkg;
 pub mod driver;
 
@@ -164,12 +159,10 @@ unsafe fn enable_bod() {
 #[unsafe(naked)]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    unsafe {
-        core::arch::naked_asm!(
-            "movi a1, 0x3FFB7C00",
-            "j _start_rust"
-        );
-    }
+    core::arch::naked_asm!(
+        "movi a1, 0x3FFB7C00",
+        "j _start_rust"
+    );
 }
 
 #[no_mangle]
@@ -185,38 +178,21 @@ pub extern "C" fn _start_rust() -> ! {
         crate::println!("Espresso OS — Boot Sequence");
         crate::println!("======================================");
 
-        crate::println!("[1/8] UART init OK");
+        crate::println!("[1/5] UART init OK");
 
-        crate::println!("[2/8] Enabling brownout detector...");
+        crate::println!("[2/5] Enabling brownout detector...");
         enable_bod();
 
-        crate::println!("[3/8] SPI init (400 kHz, SW CS GPIO5)...");
-        drivers::spi::spi_init();
-
-        crate::println!("[4/8] SD card init...");
-        match drivers::sd::init_fs() {
-            Ok(()) => crate::println!("[4/8] SD card mounted OK"),
-            Err(e) => crate::println!("[4/8] SD card FAILED: {}", e),
-        }
-
-        crate::println!("[5/8] I2C init + SH1106 display...");
-        drivers::i2c::init();
-        let i2c_ok = drivers::i2c::write(display::I2C_ADDR, &[0x00, 0xAF]); // display ON cmd
-        crate::println!("[5/8] I2C probe: {}", if i2c_ok { "ACK OK" } else { "NACK (check wiring/pull-ups)" });
-        display::init();
-        display::clear_display();
-        crate::println!("[5/8] Display init OK");
-
-        crate::println!("[6/8] Initializing scheduler...");
+        crate::println!("[3/5] Initializing scheduler...");
         scheduler::init_scheduler();
 
-        crate::println!("[6b] Installing SYSCALL exception vector...");
+        crate::println!("[3b] Installing SYSCALL exception vector...");
         setup_vecbase();
         let mut vb: u32 = 0;
         core::arch::asm!("rsr {0}, vecbase", out(reg) vb);
-        crate::println!("[6b] VECBASE = 0x{:08X} (expected 0x{:08X})", vb, &raw const espresso_vecbase as usize);
+        crate::println!("[3b] VECBASE = 0x{:08X} (expected 0x{:08X})", vb, &raw const espresso_vecbase as usize);
 
-        crate::println!("[7/8] Initializing subsystems...");
+        crate::println!("[4/5] Initializing subsystems...");
         vfs::init_vfs();
         caps::init_caps();
         event_log::log_boot();
@@ -224,35 +200,27 @@ pub extern "C" fn _start_rust() -> ! {
         panic_policy::init_crash_log();
         driver::init_slots();
 
-        crate::println!("[8/8] Checking for crash loops...");
+        crate::println!("[5/5] Checking for crash loops...");
         if panic_policy::check_crash_loop() {
-            crate::panic_policy::recovery_prompt();
-        }
-
-        // Display splash
-        {
-            use crate::display::GRID;
-            GRID.clear();
-            GRID.write_str("Espresso OS v0.1.0\n");
-            GRID.write_str("Phase 2 in progress\n");
-            GRID.write_str("UART ready\n");
-            unsafe { crate::display::render(&GRID); }
+            crate::println!("CRASH LOOP DETECTED! Halting.");
+            loop { core::arch::asm!("nop"); }
         }
 
         crate::println!("======================================");
-        crate::println!("Boot complete, launching shell.");
+        crate::println!("Boot complete. Persistent runtime active.");
         crate::println!("");
 
-        shell::start_shell();
-
-        crate::println!("Shell halted. Idle.");
-        loop { core::arch::asm!("nop"); }
+        loop {
+            crate::wdt_feed();
+            scheduler::scheduler_tick();
+            core::arch::asm!("nop");
+        }
     }
 }
 
 pub fn run_program(path: &str) {
     crate::println!("[RUN] Starting run_program for '{}'", path);
-    match loader::load_from_sd(path) {
+    match loader::load_from_storage(path) {
         Ok(prog) => {
             crate::println!("[RUN] Program loaded: base=0x{:08X}, entry=0x{:08X}, stack={}B",
                 prog.base, prog.entry, prog.stack_size);

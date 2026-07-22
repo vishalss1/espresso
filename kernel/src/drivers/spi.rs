@@ -185,7 +185,7 @@ impl RawSpi {
             core::ptr::write_volatile(SPI_USER, SPI_USER_MOSI | SPI_USER_MISO | SPI_USER_DOUTDIN);
             core::ptr::write_volatile(SPI_CTRL2, 0);
 
-            // ── Step 8: Clock = 400 kHz for SD card init ────────────────────────
+            // ── Step 8: Clock = 400 kHz for slow speed initialization ────────────────────────
             core::ptr::write_volatile(SPI_CLOCK, (3 << 18) | (49 << 12) | (24 << 6) | 49);
         }
     }

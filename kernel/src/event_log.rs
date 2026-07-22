@@ -12,7 +12,6 @@ pub const EVT_PERM_DENIED: u8 = 0x03;
 pub const EVT_WDT_GAP: u8 = 0x04;
 pub const EVT_PANIC: u8 = 0x05;
 pub const EVT_BOOT: u8 = 0x06;
-pub const EVT_SHELL_CMD: u8 = 0x07;
 pub const EVT_TASK_SPAWN: u8 = 0x08;
 pub const EVT_TASK_KILL: u8 = 0x09;
 
@@ -85,7 +84,6 @@ fn event_name(et: u8) -> &'static str {
         EVT_WDT_GAP => "WDT_GAP",
         EVT_PANIC => "PANIC",
         EVT_BOOT => "BOOT",
-        EVT_SHELL_CMD => "SHELL",
         EVT_TASK_SPAWN => "SPAWN",
         EVT_TASK_KILL => "KILL",
         _ => "???",

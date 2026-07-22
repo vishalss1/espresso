@@ -97,11 +97,11 @@ def parse_elf32(data):
     if text_sec is None:
         raise ValueError("No .text section found")
 
-    code = data[text_sec['offset']:text_sec['offset']+text_sec['size']]
+    code = bytearray(data[text_sec['offset']:text_sec['offset']+text_sec['size']])
     if data_sec and data_sec['size'] > 0:
-        initialized_data = data[data_sec['offset']:data_sec['offset']+data_sec['size']]
+        initialized_data = bytearray(data[data_sec['offset']:data_sec['offset']+data_sec['size']])
     else:
-        initialized_data = b''
+        initialized_data = bytearray()
     bss_size = bss_sec['size'] if bss_sec else 0
 
     # Scan for relocations: find all 32-bit words in .text and .data
@@ -112,25 +112,25 @@ def parse_elf32(data):
     data_size = len(initialized_data)
     total_size = code_size + data_size
 
-    def scan_section(sec_data, sec_addr, sec_offset_in_image):
+    def scan_section(sec_bytes, sec_addr, sec_offset_in_image):
         """Scan a section's data for absolute addresses that need relocation."""
-        for i in range(0, len(sec_data) - 3, 4):
-            val = struct.unpack_from("<I", sec_data, i)[0]
+        for i in range(0, len(sec_bytes) - 3, 4):
+            val = struct.unpack_from("<I", sec_bytes, i)[0]
             # Check if the value looks like an address in the program's address space
             if val >= base and val < base + total_size:
                 relocs.append(sec_offset_in_image + i)
+                # Subtract base to make it relative (so it works with simple loader offset adding)
+                struct.pack_into("<I", sec_bytes, i, val - base)
 
-    scan_section(data[text_sec['offset']:text_sec['offset']+text_sec['size']],
-                 text_sec['addr'], 0)
+    scan_section(code, text_sec['addr'], 0)
     if data_sec and data_sec['size'] > 0:
-        scan_section(data[data_sec['offset']:data_sec['offset']+data_sec['size']],
-                     data_sec['addr'], code_size)
+        scan_section(initialized_data, data_sec['addr'], code_size)
 
     entry_offset = entry - base
 
     return {
-        'code': code,
-        'data': initialized_data,
+        'code': bytes(code),
+        'data': bytes(initialized_data),
         'bss_size': bss_size,
         'entry_offset': entry_offset,
         'relocs': relocs,
