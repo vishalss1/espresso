@@ -26,6 +26,7 @@ pub mod deploy;
 pub mod driver;
 pub mod wdt;
 pub mod arch;
+pub mod host_proto;
 
 extern "C" {
     static mut _bss_start: u32;
@@ -208,7 +209,7 @@ pub extern "C" fn _start_rust() -> ! {
         crate::println!("[VECBASE] 0x{:08X} (expected 0x{:08X})", vb, &raw const espresso_vecbase as usize);
 
         // Step 14: Active kernel services started (Network, Logger, Host Protocol)
-        crate::println!("[SERVICES] Starting kernel services...");
+        crate::println!("[SERVICES] Starting Host Protocol Service (Task #3)...");
 
         // Step 15: Device Registry replays deployment pipeline from /cfg
         crate::println!("[DEVICE_REGISTRY] Replaying persisted application deployments...");
@@ -225,6 +226,7 @@ pub extern "C" fn _start_rust() -> ! {
 
         loop {
             wdt::wdt_feed();
+            host_proto::process_uart_frame();
             scheduler::scheduler_tick();
             core::arch::asm!("nop");
         }
