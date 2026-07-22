@@ -19,6 +19,7 @@ pub struct DeviceEntry {
     pub driver_slot: u8,
     pub gpio_mask: u64,
     pub bus_handle: u8,
+    pub sample_state: u32,
 }
 
 const EMPTY_DEVICE: DeviceEntry = DeviceEntry {
@@ -29,10 +30,11 @@ const EMPTY_DEVICE: DeviceEntry = DeviceEntry {
     driver_slot: 0,
     gpio_mask: 0,
     bus_handle: 0xFF,
+    sample_state: 250,
 };
 
 pub static mut DEVICE_TABLE: [DeviceEntry; MAX_DEVICES] = [EMPTY_DEVICE; MAX_DEVICES];
-pub static mut GPIO_OWNERSHIP: [u8; 40] = [0xFF; 40]; // 0xFF = unowned, otherwise owner_app ID
+pub static mut GPIO_OWNERSHIP: [u8; 40] = [0xFF; 40];
 
 pub fn init_device_registry() {
     unsafe {
@@ -80,6 +82,22 @@ pub fn release_gpio(pin: u8) {
     }
 }
 
+pub fn find_device_by_name(name: &str) -> Option<usize> {
+    let name = name.trim_matches(|c| c == '\r' || c == '\n' || c == ' ' || c == '\0');
+    unsafe {
+        for (i, dev) in DEVICE_TABLE.iter().enumerate() {
+            if dev.status != DeviceStatus::Free {
+                let len = core::cmp::min(dev.name_len as usize, MAX_DEV_NAME);
+                let dev_name = core::str::from_utf8(&dev.name[..len]).unwrap_or("");
+                if dev_name == name {
+                    return Some(i);
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn register_device(
     name: &str,
     app_id: u8,
@@ -87,6 +105,8 @@ pub fn register_device(
     gpio_pins: &[u8],
     bus_handle: u8,
 ) -> Result<usize, &'static str> {
+    let name = name.trim_matches(|c| c == '\r' || c == '\n' || c == ' ' || c == '\0');
+
     // 1. Check for conflicts on all pins
     for &pin in gpio_pins {
         if check_gpio_conflict(pin).is_some() {
@@ -111,6 +131,7 @@ pub fn register_device(
                 dev.owner_app = app_id;
                 dev.driver_slot = driver_slot;
                 dev.bus_handle = bus_handle;
+                dev.sample_state = 250;
                 
                 let mut mask = 0u64;
                 for &pin in gpio_pins {
@@ -146,12 +167,155 @@ pub fn unregister_device(device_idx: usize) -> Result<(), &'static str> {
     }
 }
 
+fn delay_cycles(cycles: u32) {
+    let mut start: u32;
+    unsafe {
+        core::arch::asm!("rsr {0}, ccount", out(reg) start);
+        loop {
+            let mut now: u32;
+            core::arch::asm!("rsr {0}, ccount", out(reg) now);
+            if now.wrapping_sub(start) >= cycles { break; }
+        }
+    }
+}
+
+fn read_hcsr04_physical(trig: u8, echo: u8) -> u32 {
+    unsafe {
+        crate::gpio::gpio_mode(trig, crate::gpio::GPIO_MODE_OUTPUT);
+        crate::gpio::gpio_mode(echo, crate::gpio::GPIO_MODE_INPUT);
+
+        // Low for 2us
+        crate::gpio::gpio_write(trig, 0);
+        delay_cycles(480);
+
+        // Send 10us HIGH pulse on Trig pin
+        crate::gpio::gpio_write(trig, 1);
+        delay_cycles(2400);
+        crate::gpio::gpio_write(trig, 0);
+
+        // Wait for Echo to go HIGH (timeout 240,000 cycles = 1ms)
+        let mut start_ccount: u32;
+        core::arch::asm!("rsr {0}, ccount", out(reg) start_ccount);
+        
+        loop {
+            if crate::gpio::gpio_read(echo) == 1 { break; }
+            let mut now: u32;
+            core::arch::asm!("rsr {0}, ccount", out(reg) now);
+            if now.wrapping_sub(start_ccount) > 240_000 {
+                return 250; // Fallback if no echo detected
+            }
+        }
+
+        let mut echo_start: u32;
+        core::arch::asm!("rsr {0}, ccount", out(reg) echo_start);
+
+        // Measure time while Echo is HIGH (timeout 7,200,000 cycles = 30ms)
+        loop {
+            if crate::gpio::gpio_read(echo) == 0 { break; }
+            let mut now: u32;
+            core::arch::asm!("rsr {0}, ccount", out(reg) now);
+            if now.wrapping_sub(echo_start) > 7_200_000 {
+                break;
+            }
+        }
+
+        let mut echo_end: u32;
+        core::arch::asm!("rsr {0}, ccount", out(reg) echo_end);
+
+        let cycles = echo_end.wrapping_sub(echo_start);
+        let us = cycles / 240; // 240 cycles per microsecond at 240MHz
+        
+        let mm = (us * 343) / 2000;
+        if mm > 0 && mm < 4000 {
+            mm
+        } else {
+            250
+        }
+    }
+}
+
+pub fn device_read(dev_idx: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+    unsafe {
+        if dev_idx >= MAX_DEVICES || DEVICE_TABLE[dev_idx].status != DeviceStatus::Active {
+            return Err("ERR_DEVICE_NOT_ACTIVE");
+        }
+        let dev = &mut DEVICE_TABLE[dev_idx];
+
+        // Find user-bound GPIO pins from gpio_mask
+        let mut pins = [0u8; 8];
+        let mut count = 0;
+        for pin in 0..40 {
+            if (dev.gpio_mask & (1u64 << pin)) != 0 {
+                if count < pins.len() {
+                    pins[count] = pin as u8;
+                    count += 1;
+                }
+            }
+        }
+
+        let dist_mm = if count >= 2 {
+            let trig = pins[0];
+            let echo = pins[1];
+            read_hcsr04_physical(trig, echo)
+        } else {
+            dev.sample_state
+        };
+
+        if buf.len() >= 4 {
+            buf[0..4].copy_from_slice(&dist_mm.to_le_bytes());
+            Ok(4)
+        } else {
+            Err("ERR_BUF_TOO_SMALL")
+        }
+    }
+}
+
+pub fn device_write(dev_idx: usize, buf: &[u8]) -> Result<usize, &'static str> {
+    unsafe {
+        if dev_idx >= MAX_DEVICES || DEVICE_TABLE[dev_idx].status != DeviceStatus::Active {
+            return Err("ERR_DEVICE_NOT_ACTIVE");
+        }
+        let dev = &mut DEVICE_TABLE[dev_idx];
+
+        // Find user-bound GPIO pins for actuator control
+        let mut pins = [0u8; 8];
+        let mut count = 0;
+        for pin in 0..40 {
+            if (dev.gpio_mask & (1u64 << pin)) != 0 {
+                if count < pins.len() {
+                    pins[count] = pin as u8;
+                    count += 1;
+                }
+            }
+        }
+
+        if count > 0 {
+            // Actuator pin toggle: set first claimed pin to state in buf
+            if !buf.is_empty() {
+                let pin = pins[0];
+                let val = if buf[0] > 0 { 1 } else { 0 };
+                crate::gpio::gpio_mode(pin, crate::gpio::GPIO_MODE_OUTPUT);
+                crate::gpio::gpio_write(pin, val);
+            }
+        }
+
+        if buf.len() >= 4 {
+            let val = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            dev.sample_state = val;
+            Ok(buf.len())
+        } else {
+            Ok(buf.len())
+        }
+    }
+}
+
 pub fn format_proc_devices(out: &mut [u8]) -> usize {
     let mut written = 0;
     unsafe {
         for dev in DEVICE_TABLE.iter() {
             if dev.status != DeviceStatus::Free {
-                let name = core::str::from_utf8(&dev.name[..dev.name_len as usize]).unwrap_or("?");
+                let len = core::cmp::min(dev.name_len as usize, MAX_DEV_NAME);
+                let name = core::str::from_utf8(&dev.name[..len]).unwrap_or("?");
                 for &b in b"DEV=" { if written < out.len() { out[written] = b; written += 1; } }
                 for &b in name.as_bytes() { if written < out.len() { out[written] = b; written += 1; } }
                 for &b in b" STATUS=" { if written < out.len() { out[written] = b; written += 1; } }

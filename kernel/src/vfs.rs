@@ -44,6 +44,7 @@ pub fn register_entry(path: &str, handler: VfsHandler) -> Result<(), &'static st
 }
 
 pub fn resolve(path: &str) -> Option<VfsHandler> {
+    // 1. Check static mounts & proc paths
     unsafe {
         for entry in VFS_TABLE.iter() {
             if entry.path_len == 0 { continue; }
@@ -52,8 +53,16 @@ pub fn resolve(path: &str) -> Option<VfsHandler> {
                 return Some(entry.handler);
             }
         }
-        None
     }
+
+    // 2. Check dynamic /dev/<name> Device Registry entries
+    if let Some(dev_name) = path.strip_prefix("/dev/") {
+        if let Some(dev_idx) = crate::device_registry::find_device_by_name(dev_name) {
+            return Some(VfsHandler::DevDevice(dev_idx as u8));
+        }
+    }
+
+    None
 }
 
 pub fn init_vfs() {
@@ -108,6 +117,10 @@ pub fn vfs_read(fd: i32, buf: &mut [u8]) -> Result<usize, &'static str> {
         104 => Ok(crate::panic_policy::read_crash_log(buf)),
         105 => Ok(crate::pal::format_proc_pal(buf)),
         106 => Ok(crate::device_registry::format_proc_devices(buf)),
+        200..=215 => {
+            let dev_idx = (fd - 200) as usize;
+            crate::device_registry::device_read(dev_idx, buf)
+        }
         0 => Ok(0),
         _ => Err("ERR_BAD_FD"),
     }
@@ -115,6 +128,10 @@ pub fn vfs_read(fd: i32, buf: &mut [u8]) -> Result<usize, &'static str> {
 
 pub fn vfs_write(fd: i32, buf: &[u8]) -> Result<usize, &'static str> {
     match fd {
+        200..=215 => {
+            let dev_idx = (fd - 200) as usize;
+            crate::device_registry::device_write(dev_idx, buf)
+        }
         0 => {
             crate::drivers::uart::RawUart.write_bytes(buf);
             Ok(buf.len())

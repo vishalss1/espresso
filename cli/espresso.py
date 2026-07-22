@@ -9,13 +9,20 @@ Usage:
     python espresso.py pal [--port COM3]
     python espresso.py logs [--port COM3]
     python espresso.py cat /proc/mem [--port COM3]
+    python espresso.py cat /dev/hcsr04 [--port COM3]
     python espresso.py ping [--port COM3]
-    python espresso.py deploy app_name [--port COM3]
+    python espresso.py deploy app_name [role=pin ...] [--pins 12,13] [--port COM3]
     python espresso.py remove app_name [--port COM3]
+
+Examples:
+    python espresso.py deploy hcsr04 trigger=12 echo=13 --port COM3
+    python espresso.py deploy motor_app pwm=32 dir1=33 dir2=25 --port COM3
+    python espresso.py deploy servo_app signal=27 --port COM3
 """
 
 import sys
 import time
+import struct
 import argparse
 
 try:
@@ -57,7 +64,15 @@ def sync_read_header(ser, timeout_sec: float = 2.0) -> bytes:
 
 def send_recv(port: str, cmd: int, payload: bytes = b"", baudrate: int = 115200, timeout: float = 2.0) -> bytes:
     try:
-        with serial.Serial(port, baudrate, timeout=timeout) as ser:
+        ser = serial.Serial()
+        ser.port = port
+        ser.baudrate = baudrate
+        ser.timeout = timeout
+        ser.dtr = False
+        ser.rts = False
+        ser.open()
+
+        with ser:
             ser.reset_input_buffer()
 
             frame = build_frame(cmd, 0, payload)
@@ -86,7 +101,9 @@ def send_recv(port: str, cmd: int, payload: bytes = b"", baudrate: int = 115200,
 def main():
     parser = argparse.ArgumentParser(description="Espresso OS Host CLI Tool")
     parser.add_argument("command", choices=["ps", "devices", "pal", "logs", "cat", "ping", "deploy", "remove"], help="Host command")
-    parser.add_argument("target", nargs="?", default="", help="Optional target argument (VFS path, app package name)")
+    parser.add_argument("target", nargs="?", default="", help="App name, device path, or target")
+    parser.add_argument("extra_args", nargs="*", default=[], help="Extra role parameters (e.g. trigger=12 echo=13)")
+    parser.add_argument("--pins", "-pin", default="", help="User-specified GPIO pins (e.g. --pins 12,13 or --pins 32,33,25)")
     parser.add_argument("--port", "-p", default="COM3", help="Serial port (default: COM3)")
 
     args = parser.parse_args()
@@ -103,10 +120,29 @@ def main():
     }
 
     cmd_id = cmd_map[args.command]
-    payload = args.target.encode("utf-8") if args.target else b""
+
+    if args.command == "deploy":
+        parts = [args.target]
+        if args.extra_args:
+            parts.extend(args.extra_args)
+        if args.pins:
+            parts.append(f"pins={args.pins}")
+        payload_str = " ".join(parts)
+        payload = payload_str.encode("utf-8")
+    else:
+        payload = args.target.encode("utf-8") if args.target else b""
 
     result = send_recv(args.port, cmd_id, payload)
-    print(result.decode("utf-8", errors="replace"), end="")
+
+    # Format binary device frames vs text proc endpoints
+    if args.command == "cat" and args.target.startswith("/dev/"):
+        if len(result) == 4:
+            distance_mm = struct.unpack("<I", result)[0]
+            print(f"{distance_mm} mm (DistanceSensor binary frame: 0x{result.hex()})")
+        else:
+            print(f"Device binary frame ({len(result)} bytes): 0x{result.hex()}")
+    else:
+        print(result.decode("utf-8", errors="replace"), end="")
 
 if __name__ == "__main__":
     main()

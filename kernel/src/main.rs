@@ -195,11 +195,12 @@ pub extern "C" fn _start_rust() -> ! {
         crate::println!("[WDT] Arming main timer WDT + RTC backstop WDT...");
         wdt::arm_wdt();
 
-        // Step 13: Scheduler init (static task table zeroed, vector base setup)
+        // Step 13: Subsystems init (Scheduler, IPC, Crash log, Device registry, Driver manager, Deploy)
         crate::println!("[SCHED] Initializing scheduler (8 static task slots)...");
         scheduler::init_scheduler();
         ipc::init_queues();
         panic_policy::init_crash_log();
+        driver::init_slots();
         device_registry::init_device_registry();
         deploy::init_deploy_subsystem();
 
