@@ -1,11 +1,12 @@
 //! GPIO driver module — read/write/mode for ESP32 pins (CLAUDE.md spec)
 
 const GPIO_BASE: u32 = 0x3FF44000;
-const GPIO_IN_REG: u32 = GPIO_BASE + 0x038;
 const GPIO_OUT_W1TS: u32 = GPIO_BASE + 0x008;
 const GPIO_OUT_W1TC: u32 = GPIO_BASE + 0x00C;
 const GPIO_ENABLE_W1TS: u32 = GPIO_BASE + 0x024;
 const GPIO_ENABLE_W1TC: u32 = GPIO_BASE + 0x028;
+const GPIO_IN_REG: u32 = GPIO_BASE + 0x03C;  // Low 32 pins (0..31)
+const GPIO_IN1_REG: u32 = GPIO_BASE + 0x040; // High 8 pins (32..39)
 
 pub const GPIO_MODE_INPUT: u8 = 0;
 pub const GPIO_MODE_OUTPUT: u8 = 1;
@@ -41,19 +42,35 @@ pub unsafe fn gpio_read(pin: u8) -> u8 {
     if pin > 39 {
         return 0;
     }
-    let val = core::ptr::read_volatile(GPIO_IN_REG as *const u32);
-    ((val >> pin) & 1) as u8
+    if pin < 32 {
+        let val = core::ptr::read_volatile(GPIO_IN_REG as *const u32);
+        ((val >> pin) & 1) as u8
+    } else {
+        let val = core::ptr::read_volatile(GPIO_IN1_REG as *const u32);
+        ((val >> (pin - 32)) & 1) as u8
+    }
 }
 
 pub unsafe fn gpio_write(pin: u8, val: u8) {
     if pin > 39 || (34..=39).contains(&pin) {
         return; // Input-only pins cannot be written
     }
-    let bit = 1u32 << pin;
-    if val != 0 {
-        core::ptr::write_volatile(GPIO_OUT_W1TS as *mut u32, bit);
+    if pin < 32 {
+        let bit = 1u32 << pin;
+        if val != 0 {
+            core::ptr::write_volatile(GPIO_OUT_W1TS as *mut u32, bit);
+        } else {
+            core::ptr::write_volatile(GPIO_OUT_W1TC as *mut u32, bit);
+        }
     } else {
-        core::ptr::write_volatile(GPIO_OUT_W1TC as *mut u32, bit);
+        let bit = 1u32 << (pin - 32);
+        let out1_w1ts = GPIO_BASE + 0x014;
+        let out1_w1tc = GPIO_BASE + 0x018;
+        if val != 0 {
+            core::ptr::write_volatile(out1_w1ts as *mut u32, bit);
+        } else {
+            core::ptr::write_volatile(out1_w1tc as *mut u32, bit);
+        }
     }
 }
 
@@ -110,17 +127,28 @@ pub unsafe fn gpio_mode(pin: u8, mode: u8) {
         // Disable DAC analog override to allow digital GPIO function
         let dac_reg = if pin == 25 { 0x3FF48484 } else { 0x3FF48488 };
         let mut dac_val = core::ptr::read_volatile(dac_reg as *const u32);
-        dac_val &= !(1 << 18); // Clear PDACx_XPD_DAC (bit 18) to power down DAC
-        dac_val |= 1 << 10;   // Set PDACx_DAC_XPD_FORCE (bit 10) to force power down
-        dac_val |= 1 << 17;   // Set PDACx_MUX_SEL (bit 17) to select digital function
+        dac_val &= !(1 << 18);
+        dac_val |= 1 << 10;
+        dac_val |= 1 << 17;
         core::ptr::write_volatile(dac_reg as *mut u32, dac_val);
     }
 
-    let bit = 1u32 << pin;
-    if mode == GPIO_MODE_OUTPUT {
-        core::ptr::write_volatile(GPIO_ENABLE_W1TS as *mut u32, bit);
+    if pin < 32 {
+        let bit = 1u32 << pin;
+        if mode == GPIO_MODE_OUTPUT {
+            core::ptr::write_volatile(GPIO_ENABLE_W1TS as *mut u32, bit);
+        } else {
+            core::ptr::write_volatile(GPIO_ENABLE_W1TC as *mut u32, bit);
+        }
     } else {
-        core::ptr::write_volatile(GPIO_ENABLE_W1TC as *mut u32, bit);
+        let bit = 1u32 << (pin - 32);
+        let enable1_w1ts = GPIO_BASE + 0x030;
+        let enable1_w1tc = GPIO_BASE + 0x034;
+        if mode == GPIO_MODE_OUTPUT {
+            core::ptr::write_volatile(enable1_w1ts as *mut u32, bit);
+        } else {
+            core::ptr::write_volatile(enable1_w1tc as *mut u32, bit);
+        }
     }
     
     // Direct GPIO output routing
@@ -132,9 +160,9 @@ pub unsafe fn gpio_mode(pin: u8, mode: u8) {
     if let Some(reg) = pin_to_io_mux_reg(pin) {
         let mut val = core::ptr::read_volatile(reg as *const u32);
         val &= !0x7000;
-        val |= 2 << 12; // GPIO function
+        val |= 2 << 12; // MCU GPIO function
         if mode == GPIO_MODE_INPUT {
-            val |= 1 << 9; // Enable input buffer
+            val |= 1 << 9; // Enable input buffer (FUN_IE)
         }
         core::ptr::write_volatile(reg as *const u32 as *mut u32, val);
     }
