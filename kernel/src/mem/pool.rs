@@ -1,28 +1,20 @@
-//! Memory management module - exec pool allocator
+//! Memory management module — exec pool allocator (CLAUDE.md spec)
 //!
-//! 82 pages * 4KB = 328KB, first-fit, 3xu32 bitmap.
-//! No heap. Every allocation is a static, fixed-size page from this pool.
-//! free_count is computed from the bitmap, not stored (avoids struct init issues).
-//!
-//! ESP32 SRAM bus layout (TRM 1.3.2.3-1.3.2.4):
-//!   SRAM0: DRAM 0x3FFB0000-0x3FFCFFFF → IRAM 0x40080000-0x4009FFFF (NORMAL word order)
-//!   SRAM1: DRAM 0x3FFE0000-0x3FFFFFFF → IRAM 0x400A0000-0x400BFFFF (REVERSED word order!)
-//!
-//! Exec pages MUST use SRAM0 (pages 0..20, DRAM 0x3FFBC800-0x3FFD07FF) so the
-//! loader's simple +0xD0000 DRAM→IRAM offset works. Stack/data pages use SRAM1
-//! (pages 20..82) where reversed IRAM ordering is irrelevant (data bus only).
+//! 107 pages * 4KB = 428KB exec pool (0x3FFBF400 - 0x3FFF8800).
+//! First-fit, 4xu32 bitmap. No heap.
 
 pub const PAGE_SIZE: usize = 4096;
-pub const TOTAL_PAGES: usize = 82; // 328KB (entire internal SRAM region starting from 0x3FFBC800)
-pub const POOL_START: usize = 0x3FFBC800; // Start of SRAM2 DRAM pool
+pub const TOTAL_PAGES: usize = 107; // 428KB (0x3FFBF400)
+pub const POOL_START: usize = 0x3FFBF400;
 
 #[repr(C)]
 pub struct ExecPool {
-    bitmap: [u32; 3],
+    bitmap: [u32; 4],
 }
 
+// 107 bits initialized to 1 (free)
 pub static mut EXEC_POOL: ExecPool = ExecPool {
-    bitmap: [0xFF8FFFFF, 0xFFFFFFFF, 0x0003FFFF], // First 82 bits are 1, but pages 20-22 are reserved for static large_bss (MBUF, EBUF, FILE_DATA)
+    bitmap: [0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x07FFFFFF],
 };
 
 fn pool_ptr() -> *const ExecPool {
@@ -38,7 +30,7 @@ pub fn free_count() -> usize {
         let p = pool_ptr();
         let mut count: usize = 0;
         let mut page: usize = 0;
-        for word_idx in 0..3u32 {
+        for word_idx in 0..4u32 {
             let word = (*p).bitmap[word_idx as usize];
             let mut bits = word;
             while bits != 0 && page < TOTAL_PAGES {
@@ -95,22 +87,12 @@ pub fn alloc_pages_in_range(count: usize, start_page: usize, end_page: usize) ->
     }
 }
 
-/// Allocate executable pages from SRAM0 (DRAM 0x3FFBC800 - 0x3FFD07FF, pages 0..20).
-///
-/// SRAM0 has NORMAL word ordering between DRAM and IRAM buses, so the simple
-/// `+0xD0000` offset correctly translates DRAM addresses to their IRAM aliases.
-/// SRAM1 (pages 20+) has REVERSED word ordering (TRM 1.3.2.4) — code written
-/// sequentially to SRAM1 DRAM appears in reverse order on the IRAM bus, causing
-/// the CPU to execute garbage. Executable pages MUST stay in SRAM0.
 pub fn alloc_exec_pages(count: usize) -> Option<usize> {
-    alloc_pages_in_range(count, 0, 20)
+    alloc_pages_in_range(count, 0, 30)
 }
 
-/// Allocate stack/data pages from SRAM1 (pages 20..82).
-/// SRAM1 has reversed IRAM word ordering but this only affects instruction fetch.
-/// Stacks and data are accessed via the data bus, where SRAM1 works normally.
 pub fn alloc_stack_pages(count: usize) -> Option<usize> {
-    alloc_pages_in_range(count, 20, 82)
+    alloc_pages_in_range(count, 30, TOTAL_PAGES)
 }
 
 pub fn alloc_pages(count: usize) -> Option<usize> {
@@ -135,20 +117,10 @@ pub fn free_page(addr: usize) {
     }
 }
 
-/// Explicitly (re)initialize the bitmap. Call after init_memory()
-/// in case .data section was clobbered by the bootloader or BSS zeroing.
 pub fn init_bitmap() {
     unsafe {
         let p = pool_mut_ptr();
-        (*p).bitmap = [0xFF8FFFFF, 0xFFFFFFFF, 0x0003FFFF]; // Reserve pages 20-22 for static large_bss buffers
-    }
-}
-
-/// Dump raw bitmap words for diagnostics.
-pub fn bitmap_words() -> (u32, u32, u32) {
-    unsafe {
-        let p = pool_ptr();
-        ((*p).bitmap[0], (*p).bitmap[1], (*p).bitmap[2])
+        (*p).bitmap = [0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x07FFFFFF];
     }
 }
 

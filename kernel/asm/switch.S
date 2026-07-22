@@ -118,62 +118,59 @@ _syscall_handler:
     wsr    a0, excsave1
     addi   a1, a1, -128
 
-    addi   a7, a1, 124
-    addi   a7, a7, 4
-    s32i   a7, a1, 4
-    s32i   a3, a1, 12
-    s32i   a4, a1, 16
-    s32i   a5, a1, 20
+    s32i   a3, a1, 12    # Save arg1 (a3)
+    s32i   a4, a1, 16    # Save arg2 (a4)
+    s32i   a5, a1, 20    # Save arg3 (a5)
+    s32i   a6, a1, 24    # Save arg4 (a6) BEFORE clobbering!
 
-    # Save EPC1 and EXCSAVE1 to stack frame to protect across context switches
+    # Save EPC1 and EXCSAVE1 to stack frame
     rsr    a7, epc1
-    s32i   a7, a1, 24
-    rsr    a7, excsave1
     s32i   a7, a1, 28
+    rsr    a7, excsave1
+    s32i   a7, a1, 32
 
-    rsr    a6, EXCCAUSE
-    movi   a7, 1
-    bne    a6, a7, _not_syscall
+    rsr    a7, EXCCAUSE
+    movi   a8, 1
+    bne    a7, a8, _not_syscall
 
-    s32i   a2, a1, 32
-    l32i   a6, a1, 12
-    s32i   a6, a1, 36
-    l32i   a6, a1, 16
-    s32i   a6, a1, 40
-    l32i   a6, a1, 20
-    s32i   a6, a1, 44
-    movi   a6, 0
-    s32i   a6, a1, 48
+    # Build SyscallContext (num:a2, arg1:a3, arg2:a4, arg3:a5, arg4:a6, pid)
+    s32i   a2, a1, 40    # context.num
+    s32i   a3, a1, 44    # context.arg1
+    s32i   a4, a1, 48    # context.arg2
+    s32i   a5, a1, 52    # context.arg3
+    l32i   a7, a1, 24
+    s32i   a7, a1, 56    # context.arg4 (saved a6)
 
-    movi   a6, CURRENT_TASK
-    l32i   a6, a6, 0
-    s32i   a6, a1, 52
+    movi   a7, CURRENT_TASK
+    l32i   a7, a7, 0
+    s32i   a7, a1, 60    # context.pid
 
-    addi   a2, a1, 32
-    movi   a6, syscall_dispatch_c
-    callx0 a6
+    addi   a2, a1, 40    # &SyscallContext
+    movi   a7, syscall_dispatch_c
+    callx0 a7
 
-    s32i   a2, a1, 8
+    s32i   a2, a1, 8     # Store return value in saved a2 slot
 
-    # Restore EPC1 and EXCSAVE1 from stack frame and advance EPC1 by 3
-    l32i   a6, a1, 24
-    addi   a6, a6, 3
-    wsr    a6, epc1
-    l32i   a6, a1, 28
-    wsr    a6, excsave1
+    # Restore EPC1 and EXCSAVE1 from stack frame and advance EPC1 by 3 (SYSCALL instruction size)
+    l32i   a7, a1, 28
+    addi   a7, a7, 3
+    wsr    a7, epc1
+    l32i   a7, a1, 32
+    wsr    a7, excsave1
 
     l32i   a5, a1, 20
     l32i   a4, a1, 16
     l32i   a3, a1, 12
-    l32i   a2, a1, 8
-    l32i   a1, a1, 4
+    l32i   a2, a1, 8     # Return value from syscall
+    addi   a1, a1, 128
 
     rsr    a0, excsave1
     rfe
 
 _not_syscall:
+    mov    a6, a7        # Move EXCCAUSE into a6 for exception printer
     # a6 = EXCCAUSE  a8..a12 are free scratch registers
-    # Print:  "\r\n!EXC exccause=XX pc=XXXXXXXX\r\n"  then hang
+    # Print:  "\r\n!EXC exccause=XX pc=XXXXXXXX\r\n"  then fault containment
 
     movi   a8, 0x3FF40000        # UART0 FIFO
 

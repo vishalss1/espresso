@@ -1,6 +1,4 @@
-//! GPIO driver module - read/write/mode for ESP32 pins
-//!
-//! Free GPIO: 2,12,15,16,17,18,23,25,26,27,32,33
+//! GPIO driver module — read/write/mode for ESP32 pins (CLAUDE.md spec)
 
 const GPIO_BASE: u32 = 0x3FF44000;
 const GPIO_IN_REG: u32 = GPIO_BASE + 0x038;
@@ -9,51 +7,53 @@ const GPIO_OUT_W1TC: u32 = GPIO_BASE + 0x00C;
 const GPIO_ENABLE_W1TS: u32 = GPIO_BASE + 0x024;
 const GPIO_ENABLE_W1TC: u32 = GPIO_BASE + 0x028;
 
-const GPIO_MODE_INPUT: u8 = 0;
-const GPIO_MODE_OUTPUT: u8 = 1;
+pub const GPIO_MODE_INPUT: u8 = 0;
+pub const GPIO_MODE_OUTPUT: u8 = 1;
+
+pub enum PinCheckResult {
+    Valid,
+    InputOnly,
+    Strapping,
+    Reserved,
+}
+
+pub fn check_pin_validity(pin: u8, mode: u8) -> PinCheckResult {
+    match pin {
+        // Internal Flash SPI pins (never assignable)
+        6..=11 | 0 => PinCheckResult::Reserved,
+        // Input-only pins
+        34..=39 => {
+            if mode == GPIO_MODE_OUTPUT {
+                PinCheckResult::InputOnly
+            } else {
+                PinCheckResult::Valid
+            }
+        }
+        // Strapping pins (assignable but flagged)
+        2 | 5 | 12 | 15 => PinCheckResult::Strapping,
+        // Valid assignable GPIOs
+        4 | 13..=19 | 21..=23 | 25..=27 | 32 | 33 => PinCheckResult::Valid,
+        _ => PinCheckResult::Reserved,
+    }
+}
 
 pub unsafe fn gpio_read(pin: u8) -> u8 {
     if pin > 39 {
         return 0;
     }
     let val = core::ptr::read_volatile(GPIO_IN_REG as *const u32);
-    let pin_val = ((val >> pin) & 1) as u8;
-    if pin == 26 {
-        static mut LAST_ECHO: u8 = 99;
-        if pin_val != LAST_ECHO {
-            LAST_ECHO = pin_val;
-            crate::println!("[GPIO_READ] pin={} changed to {} (GPIO_IN_REG=0x{:08X})", pin, pin_val, val);
-        }
-    } else if pin == 17 {
-        static mut LAST_17: u8 = 99;
-        if pin_val != LAST_17 {
-            LAST_17 = pin_val;
-            crate::println!("[GPIO_READ] pin={} changed to {} (GPIO_IN_REG=0x{:08X})", pin, pin_val, val);
-        }
-    } else if pin == 32 {
-        static mut LAST_32: u8 = 99;
-        if pin_val != LAST_32 {
-            LAST_32 = pin_val;
-            crate::println!("[GPIO_READ] pin={} changed to {} (GPIO_IN_REG=0x{:08X})", pin, pin_val, val);
-        }
-    }
-    pin_val
+    ((val >> pin) & 1) as u8
 }
 
 pub unsafe fn gpio_write(pin: u8, val: u8) {
-    if pin > 39 {
-        return;
+    if pin > 39 || (34..=39).contains(&pin) {
+        return; // Input-only pins cannot be written
     }
     let bit = 1u32 << pin;
     if val != 0 {
         core::ptr::write_volatile(GPIO_OUT_W1TS as *mut u32, bit);
     } else {
         core::ptr::write_volatile(GPIO_OUT_W1TC as *mut u32, bit);
-    }
-    if pin == 25 || pin == 16 || pin == 27 {
-        let enable_val = core::ptr::read_volatile(0x3FF44020 as *const u32);
-        let out_val = core::ptr::read_volatile(0x3FF44004 as *const u32);
-        crate::println!("[GPIO_WRITE] pin={} val={} (ENABLE_REG=0x{:08X} OUT_REG=0x{:08X})", pin, val, enable_val, out_val);
     }
 }
 
@@ -86,9 +86,9 @@ fn pin_to_io_mux_reg(pin: u8) -> Option<u32> {
         6  => Some(0x60),
         7  => Some(0x64),
         8  => Some(0x68),
-        5  => Some(0x68),
-        18 => Some(0x6C),
-        19 => Some(0x70),
+        5  => Some(0x6C),
+        18 => Some(0x70),
+        19 => Some(0x74),
         21 => Some(0x7C),
         22 => Some(0x80),
         23 => Some(0x8C),
@@ -101,20 +101,21 @@ pub unsafe fn gpio_mode(pin: u8, mode: u8) {
     if pin > 39 {
         return;
     }
-    if pin == 25 || pin == 26 || pin == 16 || pin == 17 || pin == 27 || pin == 32 {
-        crate::println!("[GPIO_MODE] pin={} mode={}", pin, mode);
+    match check_pin_validity(pin, mode) {
+        PinCheckResult::Reserved | PinCheckResult::InputOnly => return,
+        _ => {}
     }
+
     if pin == 25 || pin == 26 {
         // Disable DAC analog override to allow digital GPIO function
         let dac_reg = if pin == 25 { 0x3FF48484 } else { 0x3FF48488 };
         let mut dac_val = core::ptr::read_volatile(dac_reg as *const u32);
-        let old_dac = dac_val;
         dac_val &= !(1 << 18); // Clear PDACx_XPD_DAC (bit 18) to power down DAC
         dac_val |= 1 << 10;   // Set PDACx_DAC_XPD_FORCE (bit 10) to force power down
-        dac_val |= 1 << 17;   // Set PDACx_MUX_SEL (bit 17) to select digital function (1) over RTC (0)
+        dac_val |= 1 << 17;   // Set PDACx_MUX_SEL (bit 17) to select digital function
         core::ptr::write_volatile(dac_reg as *mut u32, dac_val);
-        crate::println!("[GPIO_MODE] pin={} DAC reg=0x{:08X} old=0x{:08X} new=0x{:08X}", pin, dac_reg, old_dac, dac_val);
     }
+
     let bit = 1u32 << pin;
     if mode == GPIO_MODE_OUTPUT {
         core::ptr::write_volatile(GPIO_ENABLE_W1TS as *mut u32, bit);
@@ -122,28 +123,19 @@ pub unsafe fn gpio_mode(pin: u8, mode: u8) {
         core::ptr::write_volatile(GPIO_ENABLE_W1TC as *mut u32, bit);
     }
     
-    // Route pin to GPIO Matrix by setting GPIO_FUNCx_OUT_SEL_CFG to 0x100 (direct GPIO output)
+    // Direct GPIO output routing
     if pin < 40 {
         let func_out_reg = 0x3FF44530 + (pin as u32) * 4;
-        let old_func = core::ptr::read_volatile(func_out_reg as *const u32);
         core::ptr::write_volatile(func_out_reg as *mut u32, 0x100);
-        if pin == 25 || pin == 26 || pin == 16 || pin == 17 || pin == 27 || pin == 32 {
-            crate::println!("[GPIO_MODE] pin={} GPIO Matrix reg=0x{:08X} old=0x{:08X} new=0x100", pin, func_out_reg, old_func);
-        }
     }
 
     if let Some(reg) = pin_to_io_mux_reg(pin) {
         let mut val = core::ptr::read_volatile(reg as *const u32);
-        let old_val = val;
-        // Clear MCU_SEL (bits 12-14) and set to 2 (GPIO function)
         val &= !0x7000;
-        val |= 2 << 12;
+        val |= 2 << 12; // GPIO function
         if mode == GPIO_MODE_INPUT {
-            val |= 1 << 9; // Set FUN_IE (bit 9) to enable input buffer
+            val |= 1 << 9; // Enable input buffer
         }
-        core::ptr::write_volatile(reg as *mut u32, val);
-        if pin == 25 || pin == 26 || pin == 16 || pin == 17 || pin == 27 || pin == 32 {
-            crate::println!("[GPIO_MODE] pin={} IO_MUX reg=0x{:08X} old=0x{:08X} new=0x{:08X}", pin, reg, old_val, val);
-        }
+        core::ptr::write_volatile(reg as *const u32 as *mut u32, val);
     }
 }

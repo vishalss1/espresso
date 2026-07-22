@@ -1,10 +1,11 @@
 //! Preemptive round-robin scheduler for Espresso OS
 //!
-//! 4 static task slots, 10ms tick, Xtensa context switch via switch.S.
+//! 8 static task slots (4 kernel services + 4 user apps per CLAUDE.md spec).
+//! 10ms tick, Xtensa context switch via switch.S.
 
 pub mod schedule;
 
-pub const MAX_TASKS: usize = 4;
+pub const MAX_TASKS: usize = 8;
 pub const TICKS_PER_SECOND: u32 = 100;
 pub const TIMER_INTERVAL_US: u32 = 10_000;
 
@@ -28,12 +29,18 @@ pub struct TaskControlBlock {
     pub ps: u32,
 }
 
-pub static mut TASKS: [TaskControlBlock; MAX_TASKS] = [
-    TaskControlBlock { pid: 0, state: TaskState::Dead, stack_base: 0, stack_size: 0, sp: 0, entry: 0, caps: 0, ps: 0 },
-    TaskControlBlock { pid: 0, state: TaskState::Dead, stack_base: 0, stack_size: 0, sp: 0, entry: 0, caps: 0, ps: 0 },
-    TaskControlBlock { pid: 0, state: TaskState::Dead, stack_base: 0, stack_size: 0, sp: 0, entry: 0, caps: 0, ps: 0 },
-    TaskControlBlock { pid: 0, state: TaskState::Dead, stack_base: 0, stack_size: 0, sp: 0, entry: 0, caps: 0, ps: 0 },
-];
+const EMPTY_TCB: TaskControlBlock = TaskControlBlock {
+    pid: 0,
+    state: TaskState::Dead,
+    stack_base: 0,
+    stack_size: 0,
+    sp: 0,
+    entry: 0,
+    caps: 0,
+    ps: 0,
+};
+
+pub static mut TASKS: [TaskControlBlock; MAX_TASKS] = [EMPTY_TCB; MAX_TASKS];
 
 #[no_mangle]
 pub static mut CURRENT_TASK: usize = 0;
@@ -58,15 +65,13 @@ pub fn next_ready_task(current: usize) -> usize {
 
 pub fn spawn_task(entry: usize, stack_size: usize, caps: u32) -> Result<usize, &'static str> {
     unsafe {
-        crate::println!("[SPAWN] Spawning new task: entry=0x{:08X}, stack_size={}, caps=0x{:08X}", entry, stack_size, caps);
+        crate::println!("[SPAWN] Spawning task: entry=0x{:08X}, stack_size={}, caps=0x{:08X}", entry, stack_size, caps);
         let slot = TASKS.iter_mut().find(|t| t.state == TaskState::Dead)
              .ok_or("ERR_NO_TASKS")?;
 
         let pages_needed = (stack_size + 4095) / 4096;
-        crate::println!("[SPAWN] Allocating {} stack pages...", pages_needed);
         let stack_base = crate::mem::pool::alloc_stack_pages(pages_needed)
             .ok_or("ERR_NO_MEMORY")?;
-        crate::println!("[SPAWN] Allocated stack_base = 0x{:08X}", stack_base);
 
         let sp = stack_base + pages_needed * 4096;
 
@@ -82,11 +87,8 @@ pub fn spawn_task(entry: usize, stack_size: usize, caps: u32) -> Result<usize, &
         slot.ps = 0x20;
 
         let frame_sp = sp - 32;
-        crate::println!("[SPAWN] Initializing stack frame: sp=0x{:08X}, writing entry 0x{:08X} to *sp", frame_sp, entry);
         core::ptr::write_volatile(frame_sp as *mut u32, entry as u32);
         slot.sp = frame_sp;
-
-        crate::println!("[SPAWN] Task slot initialized: pid={}, TCB.sp=0x{:08X}, TCB.ps=0x{:02X}", task_idx, slot.sp, slot.ps);
 
         Ok(task_idx)
     }
@@ -118,10 +120,10 @@ pub fn kill_task(pid: usize) -> Result<(), &'static str> {
     }
 }
 
+/// Called once per tick interrupt. Note: WDT feed is done in tick ISR directly, not here.
 pub fn scheduler_tick() {
     unsafe {
         TICK_COUNT = TICK_COUNT.wrapping_add(1);
-        crate::wdt_feed();
 
         let current = CURRENT_TASK;
 
@@ -152,9 +154,6 @@ pub fn scheduler_tick() {
             let current_ptr = &mut TASKS[current] as *mut TaskControlBlock;
             let next_ptr    = &mut TASKS[next]    as *mut TaskControlBlock;
             switch_context(current_ptr, next_ptr);
-
-        } else {
-
         }
     }
 }
@@ -167,9 +166,6 @@ fn switch_context(current: *mut TaskControlBlock, next: *mut TaskControlBlock) {
     unsafe { switch(current, next); }
 }
 
-/// Kill the current task and immediately context-switch to the next alive task.
-/// Called from the assembly exception handler (_not_syscall) and SYS_EXIT.
-/// Never returns — the calling task is dead and its stack is abandoned.
 #[no_mangle]
 pub extern "C" fn kill_and_switch() -> ! {
     unsafe {
@@ -217,9 +213,10 @@ pub fn init_scheduler() {
             task.caps = 0;
         }
 
+        // Slot 0: Idle task
         TASKS[0].pid = 0;
         TASKS[0].state = TaskState::Running;
-        TASKS[0].caps = 0xFFFFFFFF;
+        TASKS[0].caps = crate::caps::CAP_ALL;
         TASKS[0].stack_base = 0x3FFB5400;
         TASKS[0].stack_size = 10240;
         TASKS[0].sp = 0x3FFB5400 + 10240;

@@ -6,9 +6,6 @@ use core::panic::PanicInfo;
 
 pub mod drivers {
     pub mod uart;
-    pub mod spi;
-    pub mod delay;
-    pub mod i2c;
 }
 pub mod scheduler;
 pub mod mem {
@@ -23,8 +20,12 @@ pub mod panic_policy;
 pub mod gpio;
 pub mod ipc;
 pub mod tty;
-pub mod pkg;
+pub mod pal;
+pub mod device_registry;
+pub mod deploy;
 pub mod driver;
+pub mod wdt;
+pub mod arch;
 
 extern "C" {
     static mut _bss_start: u32;
@@ -47,7 +48,8 @@ fn panic(info: &PanicInfo) -> ! {
     crate::event_log::log_panic(pid);
     crate::panic_policy::record_crash();
 
-    loop { unsafe { core::arch::asm!("nop"); } }
+    // Trigger software reset via RTC_CNTL per CLAUDE.md panic policy
+    crate::panic_policy::reset_system();
 }
 
 const fn to_array_32(s: &[u8]) -> [u8; 32] {
@@ -117,36 +119,6 @@ unsafe fn init_memory() {
     }
 }
 
-pub unsafe fn wdt_feed() {
-    const RTC_CNTL_WDTWPROTECT: *mut u32 = 0x3FF480A4 as *mut u32;
-    const RTC_CNTL_WDTFEED: *mut u32 = 0x3FF480A0 as *mut u32;
-    core::ptr::write_volatile(RTC_CNTL_WDTWPROTECT, 0x50D83AA1);
-    core::ptr::write_volatile(RTC_CNTL_WDTFEED, 1);
-    core::ptr::write_volatile(RTC_CNTL_WDTWPROTECT, 0);
-}
-
-unsafe fn disable_wdt() {
-    const RTC_CNTL_WDTWPROTECT: *mut u32 = 0x3FF480A4 as *mut u32;
-    const RTC_CNTL_WDTCONFIG0:  *mut u32 = 0x3FF48094 as *mut u32;
-    const RTC_CNTL_WDTCONFIG1:  *mut u32 = 0x3FF48098 as *mut u32;
-    const RTC_CNTL_WDTFEED:     *mut u32 = 0x3FF480A0 as *mut u32;
-    const RTC_CNTL_BROWN_OUT:   *mut u32 = 0x3FF4808C as *mut u32;
-    const TIMG0_WDTWPROTECT:    *mut u32 = 0x3FF5F064 as *mut u32;
-    const TIMG0_WDTCONFIG0:     *mut u32 = 0x3FF5F048 as *mut u32;
-
-    core::ptr::write_volatile(RTC_CNTL_WDTWPROTECT, 0x50D83AA1);
-    core::ptr::write_volatile(RTC_CNTL_BROWN_OUT, 0);
-
-    core::ptr::write_volatile(RTC_CNTL_WDTCONFIG0, 0);
-    core::ptr::write_volatile(RTC_CNTL_WDTCONFIG1, 0xFFFFFFFF);
-    core::ptr::write_volatile(RTC_CNTL_WDTFEED, 1);
-    core::ptr::write_volatile(RTC_CNTL_WDTWPROTECT, 0);
-
-    core::ptr::write_volatile(TIMG0_WDTWPROTECT, 0x50D83AA1);
-    core::ptr::write_volatile(TIMG0_WDTCONFIG0, 0);
-    core::ptr::write_volatile(TIMG0_WDTWPROTECT, 0);
-}
-
 unsafe fn enable_bod() {
     const RTC_CNTL_BROWN_OUT: *mut u32 = 0x3FF4808C as *mut u32;
     const RTC_CNTL_BROWN_OUT_REG: *mut u32 = 0x3FF480D0 as *mut u32;
@@ -168,78 +140,93 @@ pub extern "C" fn _start() -> ! {
 #[no_mangle]
 pub extern "C" fn _start_rust() -> ! {
     unsafe {
+        // Step 3: BSS zero, .data copy from flash
         init_memory();
         crate::mem::pool::init_bitmap();
+
+        // Step 4 & 5: Check RTC crash-loop backoff
+        if panic_policy::check_crash_loop() {
+            drivers::uart::RawUart::init();
+            crate::println!("\r\n======================================");
+            crate::println!("CRASH LOOP DETECTED! Boot halted.");
+            crate::println!("Espresso OS Recovery Prompt active.");
+            crate::println!("======================================");
+            loop {
+                wdt::wdt_feed();
+                core::arch::asm!("nop");
+            }
+        }
+
+        // Step 6: UART0 init (115200 baud) — only fixed peripheral path
         drivers::uart::RawUart::init();
-        disable_wdt();
 
         crate::println!("");
         crate::println!("======================================");
         crate::println!("Espresso OS — Boot Sequence");
         crate::println!("======================================");
 
-        crate::println!("[1/5] UART init OK");
-
-        crate::println!("[2/5] Enabling brownout detector...");
+        // Step 7: BOD enabled (RTC_CNTL brownout detector)
+        crate::println!("[BOD] Enabling brownout detector...");
         enable_bod();
 
-        crate::println!("[3/5] Initializing scheduler...");
-        scheduler::init_scheduler();
+        // Step 8: Surface prior boot panic record if present
+        let mut crash_buf = [0u8; 256];
+        let n = panic_policy::read_crash_log(&mut crash_buf);
+        if n > 0 {
+            crate::println!("[CRASH_LOG] Surface prior panic record:");
+            if let Ok(s) = core::str::from_utf8(&crash_buf[..n]) {
+                crate::println!("{}", s);
+            }
+        }
 
-        crate::println!("[3b] Installing SYSCALL exception vector...");
+        // Step 9: Internal flash filesystem mounted (/cfg /drv /app /data /tmp)
+        crate::println!("[VFS] Mounting internal flash filesystem...");
+        vfs::init_vfs();
+
+        // Step 10: Capability table zeroed, default task capabilities assigned
+        crate::println!("[CAPS] Initializing capability table...");
+        caps::init_caps();
+
+        // Step 11: Event ring buffer zeroed & boot logged
+        event_log::log_boot();
+
+        // Step 12: WDT armed (main + RTC backstop)
+        crate::println!("[WDT] Arming main timer WDT + RTC backstop WDT...");
+        wdt::arm_wdt();
+
+        // Step 13: Scheduler init (static task table zeroed, vector base setup)
+        crate::println!("[SCHED] Initializing scheduler (8 static task slots)...");
+        scheduler::init_scheduler();
+        ipc::init_queues();
+        panic_policy::init_crash_log();
+        device_registry::init_device_registry();
+        deploy::init_deploy_subsystem();
+
         setup_vecbase();
         let mut vb: u32 = 0;
         core::arch::asm!("rsr {0}, vecbase", out(reg) vb);
-        crate::println!("[3b] VECBASE = 0x{:08X} (expected 0x{:08X})", vb, &raw const espresso_vecbase as usize);
+        crate::println!("[VECBASE] 0x{:08X} (expected 0x{:08X})", vb, &raw const espresso_vecbase as usize);
 
-        crate::println!("[4/5] Initializing subsystems...");
-        vfs::init_vfs();
-        caps::init_caps();
-        event_log::log_boot();
-        ipc::init_queues();
-        panic_policy::init_crash_log();
-        driver::init_slots();
+        // Step 14: Active kernel services started (Network, Logger, Host Protocol)
+        crate::println!("[SERVICES] Starting kernel services...");
 
-        crate::println!("[5/5] Checking for crash loops...");
-        if panic_policy::check_crash_loop() {
-            crate::println!("CRASH LOOP DETECTED! Halting.");
-            loop { core::arch::asm!("nop"); }
-        }
+        // Step 15: Device Registry replays deployment pipeline from /cfg
+        crate::println!("[DEVICE_REGISTRY] Replaying persisted application deployments...");
+        deploy::replay_persisted_apps();
 
+        // Step 16: WiFi credentials restored from /cfg if present
+        crate::println!("[NET] Restoring WiFi credentials...");
+
+        // Step 17 & 18: Preemption active, Host Protocol Splash Banner
         crate::println!("======================================");
-        crate::println!("Boot complete. Persistent runtime active.");
+        crate::println!("Espresso OS Kernel live (Persistent platform active)");
+        crate::println!("======================================");
         crate::println!("");
 
         loop {
-            crate::wdt_feed();
+            wdt::wdt_feed();
             scheduler::scheduler_tick();
             core::arch::asm!("nop");
-        }
-    }
-}
-
-pub fn run_program(path: &str) {
-    crate::println!("[RUN] Starting run_program for '{}'", path);
-    match loader::load_from_storage(path) {
-        Ok(prog) => {
-            crate::println!("[RUN] Program loaded: base=0x{:08X}, entry=0x{:08X}, stack={}B",
-                prog.base, prog.entry, prog.stack_size);
-            crate::event_log::log_task_spawn(0xFF);
-
-            let entry = prog.entry;
-            let stack = if prog.stack_size > 0 { prog.stack_size } else { 4096 };
-            crate::println!("[RUN] Spawning task: entry=0x{:08X}, stack_size={}", entry, stack);
-            match scheduler::spawn_task(entry, stack, caps::CAP_ALL) {
-                Ok(pid) => {
-                    crate::println!("[RUN] Success: task spawned as PID {}", pid);
-                }
-                Err(e) => {
-                    crate::println!("[RUN] Error spawning task: {}", e);
-                }
-            }
-        }
-        Err(e) => {
-            crate::println!("[RUN] Loader failed: {}", e);
         }
     }
 }

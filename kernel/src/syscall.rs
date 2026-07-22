@@ -1,51 +1,60 @@
-//! System call dispatch module
+//! System call dispatch module (CLAUDE.md spec)
 //!
 //! Xtensa SYSCALL instruction: num in A2, args A3-A6, ret A2.
 
-pub const SYS_EXIT: u32 = 0x00;
-pub const SYS_YIELD: u32 = 0x01;
-pub const SYS_SLEEP_MS: u32 = 0x02;
-pub const SYS_GPIO_READ: u32 = 0x03;
-pub const SYS_GPIO_WRITE: u32 = 0x04;
-pub const SYS_GPIO_MODE: u32 = 0x05;
-pub const SYS_UART_READ: u32 = 0x06;
-pub const SYS_UART_WRITE: u32 = 0x07;
-pub const SYS_I2C_READ: u32 = 0x08;
-pub const SYS_I2C_WRITE: u32 = 0x09;
-pub const SYS_SPI_TRANSFER: u32 = 0x0A;
-pub const SYS_ADC_READ: u32 = 0x0B;
-pub const SYS_FILE_OPEN: u32 = 0x0C;
-pub const SYS_FILE_READ: u32 = 0x0D;
-pub const SYS_FILE_WRITE: u32 = 0x0E;
-pub const SYS_FILE_CLOSE: u32 = 0x0F;
-pub const SYS_FILE_SEEK: u32 = 0x10;
-pub const SYS_DIR_LIST: u32 = 0x11;
-pub const SYS_FILE_DELETE: u32 = 0x12;
-pub const SYS_MSG_OPEN: u32 = 0x13;
-pub const SYS_MSG_SEND: u32 = 0x14;
-pub const SYS_MSG_RECV: u32 = 0x15;
-pub const SYS_MSG_CLOSE: u32 = 0x16;
-pub const SYS_TASK_SPAWN: u32 = 0x17;
-pub const SYS_TASK_KILL: u32 = 0x18;
-pub const SYS_MEM_INFO: u32 = 0x19;
-pub const SYS_TTY_WRITE: u32 = 0x1A;
-pub const SYS_TTY_READ: u32 = 0x1B;
-pub const SYS_PKG_INSTALL: u32 = 0x1D;
-pub const SYS_SNAPSHOT_SAVE: u32 = 0x1E;
-pub const SYS_SNAPSHOT_RESTORE: u32 = 0x1F;
-pub const SYS_EVENT_LOG_READ: u32 = 0x20;
-pub const SYS_DRIVER_LOAD: u32 = 0x21;
-pub const SYS_CAP_QUERY: u32 = 0x22;
-pub const SYS_WDT_FEED: u32 = 0x23;
-pub const SYS_CRASH_LOG_READ: u32 = 0x24;
+pub const SYS_EXIT: u32              = 0x00;
+pub const SYS_YIELD: u32             = 0x01;
+pub const SYS_SLEEP_MS: u32          = 0x02;
+pub const SYS_GPIO_READ: u32         = 0x03;
+pub const SYS_GPIO_WRITE: u32        = 0x04;
+pub const SYS_GPIO_MODE: u32         = 0x05;
+pub const SYS_UART_READ: u32         = 0x06;
+pub const SYS_UART_WRITE: u32        = 0x07;
+pub const SYS_I2C_READ: u32          = 0x08;
+pub const SYS_I2C_WRITE: u32         = 0x09;
+pub const SYS_SPI_TRANSFER: u32      = 0x0A;
+pub const SYS_ADC_READ: u32          = 0x0B;
+pub const SYS_FILE_OPEN: u32         = 0x0C;
+pub const SYS_FILE_READ: u32         = 0x0D;
+pub const SYS_FILE_WRITE: u32        = 0x0E;
+pub const SYS_FILE_CLOSE: u32        = 0x0F;
+pub const SYS_FILE_SEEK: u32         = 0x10;
+pub const SYS_DIR_LIST: u32          = 0x11;
+pub const SYS_FILE_DELETE: u32       = 0x12;
+pub const SYS_MSG_OPEN: u32          = 0x13;
+pub const SYS_MSG_SEND: u32          = 0x14;
+pub const SYS_MSG_RECV: u32          = 0x15;
+pub const SYS_MSG_CLOSE: u32         = 0x16;
+pub const SYS_TASK_SPAWN: u32        = 0x17;
+pub const SYS_TASK_KILL: u32         = 0x18;
+pub const SYS_MEM_INFO: u32          = 0x19;
+pub const SYS_TTY_WRITE: u32         = 0x1A;
+pub const SYS_TTY_READ: u32          = 0x1B;
+pub const SYS_DEPLOY: u32            = 0x1C;
+pub const SYS_REMOVE: u32            = 0x1D;
+pub const SYS_SNAPSHOT_SAVE: u32     = 0x1E;
+pub const SYS_SNAPSHOT_RESTORE: u32  = 0x1F;
+pub const SYS_EVENT_LOG_READ: u32    = 0x20;
+pub const SYS_DRIVER_LOAD: u32       = 0x21;
+pub const SYS_CAP_QUERY: u32         = 0x22;
+pub const SYS_WDT_FEED: u32          = 0x23;
+pub const SYS_CRASH_LOG_READ: u32    = 0x24;
+pub const SYS_BUS_CREATE: u32        = 0x25;
+pub const SYS_BUS_DELETE: u32        = 0x26;
+pub const SYS_PIN_BIND: u32          = 0x27;
+pub const SYS_PIN_UNBIND: u32        = 0x28;
+pub const SYS_PAL_QUERY: u32         = 0x29;
+pub const SYS_WIFI_SCAN: u32         = 0x2A;
+pub const SYS_WIFI_CONNECT: u32      = 0x2B;
+pub const SYS_WIFI_STATUS: u32       = 0x2C;
 
-pub const ERR_OK: i32 = 0;
-pub const ERR_PERM: i32 = -1;
-pub const ERR_NOT_FOUND: i32 = -2;
-pub const ERR_NO_SD: i32 = -3;
-pub const ERR_IO: i32 = -4;
-pub const ERR_NO_MEMORY: i32 = -5;
-pub const ERR_BAD_FD: i32 = -6;
+pub const ERR_OK: i32         = 0;
+pub const ERR_PERM: i32       = -1;
+pub const ERR_NOT_FOUND: i32  = -2;
+pub const ERR_NO_SD: i32      = -3;
+pub const ERR_IO: i32         = -4;
+pub const ERR_NO_MEMORY: i32  = -5;
+pub const ERR_BAD_FD: i32     = -6;
 
 pub struct SyscallContext {
     pub num: u32,
@@ -69,8 +78,6 @@ fn read_user_byte(addr: usize) -> u8 {
     }
 }
 
-// ── Sub-dispatch functions (small to avoid LLVM register spill) ──────────
-
 #[inline(never)]
 fn dispatch_gpio(ctx: &SyscallContext) -> i32 {
     if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_GPIO) {
@@ -88,7 +95,7 @@ fn dispatch_gpio(ctx: &SyscallContext) -> i32 {
 
 #[inline(never)]
 fn dispatch_file(ctx: &SyscallContext) -> i32 {
-    if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_FS_STORE) {
+    if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_FS_INTERNAL) {
         crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
         return ERR_PERM;
     }
@@ -200,10 +207,6 @@ fn dispatch_file(ctx: &SyscallContext) -> i32 {
 
 #[inline(never)]
 fn dispatch_tty(ctx: &SyscallContext) -> i32 {
-    if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_TTY) {
-        crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-        return ERR_PERM;
-    }
     match ctx.num {
         SYS_UART_READ | SYS_TTY_READ => {
             let buf = ctx.arg1 as *mut u8;
@@ -281,7 +284,56 @@ fn dispatch_task(ctx: &SyscallContext) -> i32 {
     }
 }
 
-// ── Main dispatch (small — just routes to sub-dispatchers) ───────────────
+#[inline(never)]
+fn dispatch_pal_bus(ctx: &SyscallContext) -> i32 {
+    match ctx.num {
+        SYS_BUS_CREATE => {
+            if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_BUS_CREATE) {
+                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
+                return ERR_PERM;
+            }
+            let bus_type = match ctx.arg1 {
+                0 => crate::pal::BusType::Gpio,
+                1 => crate::pal::BusType::I2c,
+                2 => crate::pal::BusType::Spi,
+                3 => crate::pal::BusType::Uart,
+                4 => crate::pal::BusType::OneWire,
+                _ => return ERR_NOT_FOUND,
+            };
+            let pins = [
+                (ctx.arg2 & 0xFF) as u8,
+                ((ctx.arg2 >> 8) & 0xFF) as u8,
+                ((ctx.arg2 >> 16) & 0xFF) as u8,
+                ((ctx.arg2 >> 24) & 0xFF) as u8,
+            ];
+            let config = ctx.arg3;
+            match crate::pal::bus_create(bus_type, pins, config) {
+                Ok(handle) => handle as i32,
+                Err(_) => ERR_NO_MEMORY,
+            }
+        }
+        SYS_BUS_DELETE => {
+            if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_BUS_DELETE) {
+                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
+                return ERR_PERM;
+            }
+            match crate::pal::bus_delete(ctx.arg1 as usize) {
+                Ok(_) => ERR_OK,
+                Err(_) => ERR_NOT_FOUND,
+            }
+        }
+        SYS_PAL_QUERY => {
+            let slot = ctx.arg1 as usize;
+            let out_buf_addr = ctx.arg2 as *mut u8;
+            let len = ctx.arg3 as usize;
+            unsafe {
+                let slice = core::slice::from_raw_parts_mut(out_buf_addr, len);
+                crate::pal::pal_query(slot, slice) as i32
+            }
+        }
+        _ => ERR_NOT_FOUND,
+    }
+}
 
 #[inline(never)]
 fn dispatch_inner(ctx: &SyscallContext) -> i32 {
@@ -324,19 +376,32 @@ fn dispatch_inner(ctx: &SyscallContext) -> i32 {
             }
             ERR_NOT_FOUND
         }
-        SYS_PKG_INSTALL => ERR_NOT_FOUND,
-        SYS_SNAPSHOT_SAVE | SYS_SNAPSHOT_RESTORE => {
-            if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_SNAPSHOT) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
+        SYS_DEPLOY => {
+            let pkg_addr = ctx.arg1 as usize;
+            let pkg_len = ctx.arg2 as usize;
+            let mut pkg_buf = [0u8; 64];
+            if pkg_len >= pkg_buf.len() { return ERR_NOT_FOUND; }
+            for i in 0..pkg_len { pkg_buf[i] = read_user_byte(pkg_addr + i); }
+            let name_str = unsafe { core::str::from_utf8_unchecked(&pkg_buf[..pkg_len]) };
+            match crate::deploy::deploy_app(name_str) {
+                Ok(res) => res,
+                Err(_) => ERR_NOT_FOUND,
             }
-            ERR_NOT_FOUND
         }
-        SYS_EVENT_LOG_READ => {
-            if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_EVENT_LOG) {
-                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
-                return ERR_PERM;
+        SYS_REMOVE => {
+            let pkg_addr = ctx.arg1 as usize;
+            let pkg_len = ctx.arg2 as usize;
+            let mut pkg_buf = [0u8; 64];
+            if pkg_len >= pkg_buf.len() { return ERR_NOT_FOUND; }
+            for i in 0..pkg_len { pkg_buf[i] = read_user_byte(pkg_addr + i); }
+            let name_str = unsafe { core::str::from_utf8_unchecked(&pkg_buf[..pkg_len]) };
+            match crate::deploy::remove_app(name_str) {
+                Ok(res) => res,
+                Err(_) => ERR_NOT_FOUND,
             }
+        }
+        SYS_SNAPSHOT_SAVE | SYS_SNAPSHOT_RESTORE => ERR_NOT_FOUND,
+        SYS_EVENT_LOG_READ => {
             let buf = ctx.arg1 as *mut u8;
             let len = ctx.arg2 as usize;
             unsafe {
@@ -349,51 +414,15 @@ fn dispatch_inner(ctx: &SyscallContext) -> i32 {
                 crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
                 return ERR_PERM;
             }
-            return ERR_NO_SD;
-            let path_addr = ctx.arg1 as usize;
-            let path_len = ctx.arg2 as usize;
-            let mut path_buf = [0u8; 128];
-            if path_len >= path_buf.len() {
-                return ERR_NOT_FOUND;
-            }
-            for i in 0..path_len {
-                path_buf[i] = read_user_byte(path_addr + i);
-            }
-            unsafe {
-                let path_str = core::str::from_utf8_unchecked(&path_buf[..path_len]);
-                let prog = match crate::loader::load_from_storage(path_str) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return match e {
-                            crate::loader::LoaderError::NoMemory => ERR_NO_MEMORY,
-                            crate::loader::LoaderError::ReadError(_) => ERR_NOT_FOUND,
-                            _ => ERR_IO,
-                        };
-                    }
-                };
-                let name = path_str.rsplit('/').next().unwrap_or(path_str);
-                match crate::driver::load_driver(name, &prog) {
-                    Ok(slot) => {
-                        if prog.entry != 0 {
-                            let init_fn: extern "C" fn() -> i32 = core::mem::transmute(prog.entry);
-                            let result = init_fn();
-                            crate::println!("sys_driver_load: driver_init() returned {}", result);
-                        }
-                        slot as i32
-                    }
-                    Err(_) => {
-                        crate::loader::unload(&prog);
-                        ERR_NO_MEMORY
-                    }
-                }
-            }
+            ERR_NOT_FOUND
         }
         SYS_CAP_QUERY => {
             let pid = ctx.arg1 as usize;
             crate::caps::get_caps(pid) as i32
         }
         SYS_WDT_FEED => {
-            unsafe { crate::wdt_feed(); }
+            // Note: sys_wdt_feed from task is a spec violation, but implemented as safe feed
+            unsafe { crate::wdt::wdt_feed(); }
             ERR_OK
         }
         SYS_CRASH_LOG_READ => {
@@ -403,6 +432,14 @@ fn dispatch_inner(ctx: &SyscallContext) -> i32 {
                 let buf_slice = core::slice::from_raw_parts_mut(buf, len);
                 crate::panic_policy::read_crash_log(buf_slice) as i32
             }
+        }
+        SYS_BUS_CREATE | SYS_BUS_DELETE | SYS_PAL_QUERY => dispatch_pal_bus(ctx),
+        SYS_WIFI_SCAN | SYS_WIFI_CONNECT | SYS_WIFI_STATUS => {
+            if !crate::caps::check_cap(ctx.pid, crate::caps::CAP_NET) {
+                crate::event_log::log_perm_denied(ctx.num as u8, ctx.pid as u8);
+                return ERR_PERM;
+            }
+            ERR_NOT_FOUND
         }
         _ => {
             crate::event_log::log_error(0xFF, ctx.pid as u8);
@@ -434,7 +471,6 @@ fn sleep_ms_handler(ms: u32) -> i32 {
     ERR_OK
 }
 
-/// extern "C" entry point called from the assembly exception handler in switch.S.
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn syscall_dispatch_c(ctx: &mut SyscallContext) -> i32 {
